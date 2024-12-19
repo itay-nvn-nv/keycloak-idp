@@ -1,0 +1,200 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-post-install
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+      - name: keycloak-health-check
+        image: busybox
+        envsFrom:
+          - configMapRef:
+              name: keycloak-values
+        env:
+        - name: KEYCLOAK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: keycloak-env-vars
+              key: KEYCLOAK_HOSTNAME
+        command:
+          - sh
+          - -c
+          - |
+            set -o errexit
+            CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-30}"
+            echo "Starting URL health check with timeout of ${activeDeadlineSeconds} seconds..."
+
+            while true; do
+              echo "Checking URL: $KEYCLOAK_URL"
+              response=$(wget -q --spider "$KEYCLOAK_URL" 2>&1)
+              if [[ "$response" =~ "200 OK" ]]; then
+                echo "Keycloak URL is healthy."
+                exit 0
+              else
+                  echo "Keycloak URL is NOT healthy. Waiting for ${CHECK_INTERVAL_SECONDS} second(s) before retrying..."
+                  sleep "$CHECK_INTERVAL_SECONDS"
+              fi
+            done
+      - name: keycloak-create-token
+        image: nginx
+        envsFrom:
+          - configMapRef:
+              name: keycloak-values
+        env:
+          - name: KEYCLOAK_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: keycloak
+                key: admin-password
+          - name: KEYCLOAK_ADMIN_USERNAME
+            valueFrom:
+              configMapKeyRef:
+                name: keycloak-env-vars
+                key: KEYCLOAK_ADMIN
+          - name: KEYCLOAK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: keycloak-env-vars
+                key: KEYCLOAK_HOSTNAME
+        command:
+          - sh
+          - -c
+          - |
+            echo hello
+            KEYCLOAK_TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "username=$KEYCLOAK_ADMIN_USERNAME" \
+              -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
+              -d 'grant_type=password' \
+              -d 'client_id=admin-cli' | jq -r '.access_token')
+            echo "export KEYCLOAK_TOKEN=$KEYCLOAK_TOKEN" >> /shared-env/env-vars.sh
+        volumeMounts:
+          - name: shared-volume
+            mountPath: /shared-env
+      - name: keycloak-import-realm
+        image: busybox
+        envsFrom:
+          - configMapRef:
+              name: keycloak-values
+        command:
+          - sh
+          - -c
+          - |
+            source /shared-env/env-vars.sh
+
+            jq \
+            --arg pattern 'RUNAI_CTRL_PLANE_URL_PLACEHOLDER' \
+            --arg replacement $RUNAI_CTRL_PLANE_URL \
+            'walk(if type == "string" then sub($pattern; $replacement) else . end)' realm.json > realm_updated.json
+
+            curl -vv "$KEYCLOAK_URL/admin/realms" \
+              -H 'accept: application/json, text/plain, */*' \
+              -H 'accept-language: en-US,en;q=0.9' \
+              -H "authorization: Bearer $KEYCLOAK_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data "@realm_updated.json"
+        volumeMounts:
+          - name: shared-volume
+            mountPath: /shared-env
+      - name: runai-health-check
+        image: busybox
+        envsFrom:
+          - configMapRef:
+              name: runai-config
+        command:
+          - sh
+          - -c
+          - |
+            set -o errexit
+            CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-30}"
+            echo "Starting URL health check with timeout of ${activeDeadlineSeconds} seconds..."
+
+            while true; do
+              echo "Checking URL: $RUNAI_CTRL_PLANE_URL"
+              response=$(wget -q --spider "$RUNAI_CTRL_PLANE_URL" 2>&1)
+              if [[ "$response" =~ "200 OK" ]]; then
+                echo "RUNAI_CTRL_PLANE_URL is healthy."
+                exit 0
+              else
+                  echo "RUNAI_CTRL_PLANE_URL is NOT healthy. Waiting for ${CHECK_INTERVAL_SECONDS} second(s) before retrying..."
+                  sleep "$CHECK_INTERVAL_SECONDS"
+              fi
+            done
+      - name: runai-create-token
+        image: busybox
+        envsFrom:
+          - configMapRef:
+              name: runai-config
+        command:
+          - sh
+          - -c
+          - |
+            source /shared-env/env-vars.sh
+
+            RUNAI_TOKEN=$(curl -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
+              --header 'accept: application/json, text/plain, */*' \
+              --header 'accept-language: en-US,en;q=0.9' \
+              --header 'Content-Type: application/json' \
+              --data-raw "{
+                \"grantType\": \"password\",
+                \"clientID\": \"cli\",
+                \"username\": \"$RUNAI_ADMIN_USERNAME\",
+                \"password\": \"$RUNAI_ADMIN_PASSWORD\"}" | jq -r .accessToken)
+
+            echo "export RUNAI_TOKEN=$RUNAI_TOKEN" >> /shared-env/env-vars.sh
+        volumeMounts:
+          - name: shared-volume
+            mountPath: /shared-env
+      - name: runai-create-idp
+        image: busybox
+        envsFrom:
+          - configMapRef:
+              name: runai-config
+        env:
+        - name: KEYCLOAK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: keycloak-env-vars
+              key: KEYCLOAK_HOSTNAME
+        command:
+          - sh
+          - -c
+          - |
+            source /shared-env/env-vars.sh
+
+            REALM_NAME=$(jq -r '.realm' realm_updated.json)
+            XML_METADATA_URL="$KEYCLOAK_URL/realms/$REALM_NAME/protocol/saml/descriptor"
+
+            curl -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
+            --header 'accept: application/json, text/plain, */*' \
+            --header 'accept-language: en-US,en;q=0.9' \
+            --header 'Content-Type: application/json' \
+            --header "authorization: Bearer $RUNAI_TOKEN" \
+            --data-raw "{
+                \"mappers\": {
+                    \"uid\": \"UID\",
+                    \"gid\": \"GID\",
+                    \"groups\": \"GROUPS\",
+                    \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
+                    \"email\": \"email\"},
+                \"type\": \"saml\",
+                \"samlData\": {
+                    \"metadataXmlUrl\": \"$XML_METADATA_URL\", #####
+                    \"metadataXmlFile\": \"\",
+                    \"fileName\": \"\",
+                    \"metadataXmlType\": \"url\"}
+            }"
+        volumeMounts:
+          - name: shared-volume
+            mountPath: /shared-env
+      containers:
+      - name: main-container
+        image: nginx
+        command: ["sleep", "infinity"]
+      volumes:
+       - name: shared-volume
+         emptyDir: {}

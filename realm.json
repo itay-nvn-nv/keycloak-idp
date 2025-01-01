@@ -1,5 +1,5 @@
 {
-    "realm": "realm-import-test-v3",
+    "realm": "chikapowpow",
     "enabled": true,
     "users": [
       {
@@ -112,7 +112,7 @@
           "standardFlowEnabled": true
       },
       {
-        "clientId": "lab-saml-client",
+        "clientId": "SAML_CLIENT_ID_PLACEHOLDER",
         "enabled": true,
         "protocol": "saml",
         "rootUrl": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER",

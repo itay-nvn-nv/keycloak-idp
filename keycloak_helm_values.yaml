@@ -6,14 +6,14 @@ auth:
 httpRelativePath: /here-is-keycloak/
 ingress:
   enabled: true
-  hostname: my-keycloak.com
+  hostname: playtika-213-debug.runailabs-cs.com
   hostnameStrict: true
   pathType: Prefix
   ingressClassName: nginx
   tls: true
   extraTls:
   - hosts:
-    - my-keycloak.com
+    - playtika-213-debug.runailabs-cs.com
     secretName: runai-cluster-domain-tls-secret
 
 logging:

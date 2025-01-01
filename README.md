@@ -6,47 +6,52 @@
 
 ## instructions
 
-**install keycloak**
-
+**1) create keycloak namespace**
 ```bash
-helm install keycloak bitnami/keycloak \
---create-namespace -n keycloak \
--f keycloak_helm_values.yaml \
---debug
+kubectl create namespace keycloak
 ```
 
-**create configmap for keycloak realm data:**
+**2) duplicate TLS secret** (requires `yq` utility)
 ```bash
-kubectl -n keycloak create secret generic keycloak-realm-data \
+kubectl -n runai get secret runai-cluster-domain-tls-secret -o yaml | \
+yq eval '
+  .metadata.namespace = "keycloak" |
+  del(.metadata.creationTimestamp) |
+  del(.metadata.resourceVersion) |
+  del(.metadata.selfLink) |
+  del(.metadata.uid)
+' - | \
+kubectl apply -f -
+```
+
+**2) create configmap for keycloak realm data:**
+```bash
+kubectl -n keycloak create configmap keycloak-realm-data \
 --from-file realm.json
 ```
 
-
-**create secret for runai values:**
-
+**3) create secret for runai values**
 ```bash
-kubectl -n keycloak create secret generic runai-config \
+kubectl -n keycloak create secret generic runai-ctrl-plane-data \
 --from-literal=RUNAI_CTRL_PLANE_URL=placeholder \
 --from-literal=RUNAI_ADMIN_USERNAME=placeholder \
 --from-literal=RUNAI_ADMIN_PASSWORD=placeholder
 ```
 
-**apply the job:**
-
+**4) install keycloak**
 ```bash
-kubectl apply -f job.yaml
+helm install keycloak bitnami/keycloak \
+-n keycloak \
+-f keycloak_helm_values.yaml \
+--debug
 ```
+before moving to next step, verify
+- installation is complete
+- pods are in running state
+- keycloak URL is accessible
 
+**5) apply the post install job**
+```bash
+kubectl -n keycloak apply -f job.yaml
+```
 this job creates realm/users/groups/clients, then integrates the SAML client with the self-hosted Run:AI ctrl plane.
-
-
-## expected envs in job manifest:
-```
-# envs:
-KEYCLOAK_URL
-KEYCLOAK_ADMIN
-KEYCLOAK_ADMIN_PASSWORD
-RUNAI_CTRL_PLANE_URL
-RUNAI_ADMIN_USERNAME
-RUNAI_ADMIN_PASSWORD
-```

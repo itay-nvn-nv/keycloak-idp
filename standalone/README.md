@@ -54,7 +54,10 @@ before moving to next step, verify
 ```bash
 kubectl -n keycloak apply -f job.yaml
 ```
-this job creates realm/users/groups/clients, then integrates the SAML client with the self-hosted Run:AI ctrl plane.
+the job performs the following:
+- creates realm/users/groups/clients in keycloak
+- integrates the SAML client with the self-hosted Run:AI ctrl plane
+- creates a dedicated project and access rule
 
 **6) IMPORTANT: add OIDC flags to kube-apiserver manifest**
 env-in-a-click self-hosted clusters come with these flags:

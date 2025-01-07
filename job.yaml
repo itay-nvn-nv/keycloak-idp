@@ -71,6 +71,9 @@ spec:
           - sh
           - -c
           - |
+            # if [[ "$KEYCLOAK_URL" == */ ]]; then
+            #   KEYCLOAK_URL="${KEYCLOAK_URL%/}"
+            # fi
             KEYCLOAK_TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               -d "username=$KEYCLOAK_ADMIN_USERNAME" \
@@ -95,12 +98,12 @@ spec:
             source /shared-files/env-vars.sh
 
             CLEAN_URL="${RUNAI_CTRL_PLANE_URL#*://}"
-            SAML_CLIENT_ID="run-$CLEAN_URL/runai"
+            SAML_CLIENT_ID="runai-$CLEAN_URL/runai"
 
             jq --arg SAML_CLIENT_ID "$SAML_CLIENT_ID" --arg RUNAI_CTRL_PLANE_URL "$RUNAI_CTRL_PLANE_URL" '
               (.. | select(type == "string")) |= gsub("RUNAI_CTRL_PLANE_URL_PLACEHOLDER"; $RUNAI_CTRL_PLANE_URL) |
               (.. | select(type == "string")) |= gsub("SAML_CLIENT_ID_PLACEHOLDER"; $SAML_CLIENT_ID)
-            ' realm.json > /shared-files/realm_updated.json
+            ' /keycloak-realm-data/realm.json > /shared-files/realm_updated.json
 
             curl -vv "$KEYCLOAK_URL/admin/realms" \
               -H 'accept: application/json, text/plain, */*' \
@@ -135,6 +138,7 @@ spec:
                 \"password\": \"$RUNAI_ADMIN_PASSWORD\"}" | jq -r .accessToken)
 
             echo "export RUNAI_TOKEN=$RUNAI_TOKEN" >> /shared-files/env-vars.sh
+            cat /shared-files/env-vars.sh
         volumeMounts:
           - name: shared-volume
             mountPath: /shared-files
@@ -175,16 +179,19 @@ spec:
 
             # get cluster + department ID's
             CLUSTER_DATA=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/departments" \
-              -H "authorization: Bearer $TOKEN" | jq)
+              -H "authorization: Bearer $RUNAI_TOKEN" | jq)
+            echo $CLUSTER_DATA
 
             CLUSTER_UUID=$(echo $CLUSTER_DATA | jq -r '.departments[0].clusterId')
             DEPARTMENT_ID=$(echo $CLUSTER_DATA | jq -r '.departments[0].id')
+            echo $CLUSTER_UUID
+            echo $DEPARTMENT_ID
 
             # create project
             PROJECT_DATA=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
               -H 'accept: application/json, text/plain, */*' \
               -H 'accept-language: en-US,en;q=0.9' \
-              -H "authorization: Bearer $TOKEN" \
+              -H "authorization: Bearer $RUNAI_TOKEN" \
               --data-raw "{
               \"clusterId\": \"$CLUSTER_UUID\",
               \"parentId\": \"$DEPARTMENT_ID\",
@@ -207,13 +214,14 @@ spec:
                 \"interactiveJobTimeLimitSeconds\": null
               }
             }" | jq)
+            echo $PROJECT_DATA
             PROJECT_ID=$(echo $PROJECT_DATA | jq -r '.id')
 
             # create access rule
             curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
               -H 'accept: application/json, text/plain, */*' \
               -H 'accept-language: en-US,en;q=0.9' \
-              -H 'authorization: Bearer $TOKEN' \
+              -H 'authorization: Bearer $RUNAI_TOKEN' \
               --data-raw "{
               \"scopeId\": \"$PROJECT_ID\",
               \"scopeType\": \"project\",

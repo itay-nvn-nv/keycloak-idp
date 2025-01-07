@@ -55,3 +55,17 @@ before moving to next step, verify
 kubectl -n keycloak apply -f job.yaml
 ```
 this job creates realm/users/groups/clients, then integrates the SAML client with the self-hosted Run:AI ctrl plane.
+
+**6) IMPORTANT: add OIDC flags to kube-apiserver manifest**
+env-in-a-click self-hosted clusters come with these flags:
+```
+    - --oidc-client-id=runai
+    - --oidc-issuer-url=https://itay-selfhosted-219.runailabs-cs.com/auth/realms/runai
+    - --oidc-username-prefix=-
+```
+
+but in SAML we also need the group+claim flags:
+```
+    - --oidc-groups-claim=groups
+    - --oidc-username-claim=email
+```

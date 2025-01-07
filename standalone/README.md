@@ -1,8 +1,4 @@
-# keycloak-idp
-## description
-- installs keycloak
-- creates realm/users/groups/clients
-- integrates the SAML client with a self-hosted Run:AI ctrl plane
+# keycloak-idp: standalone
 
 ## instructions
 
@@ -59,16 +55,18 @@ the job performs the following:
 - integrates the SAML client with the self-hosted Run:AI ctrl plane
 - creates a dedicated project and access rule
 
-**6) IMPORTANT: add OIDC flags to kube-apiserver manifest**
-env-in-a-click self-hosted clusters come with these flags:
+**6) OPTIONAL: add OIDC group flags to kube-apiserver manifest**
+env-in-a-click self-hosted clusters come pre-packaged with OIDC flags in the kube-apiserver deployment:
 ```
     - --oidc-client-id=runai
     - --oidc-issuer-url=https://itay-selfhosted-219.runailabs-cs.com/auth/realms/runai
     - --oidc-username-prefix=-
 ```
 
-but in SAML we also need the group+claim flags:
+If you want to use CLI v1 with the SSO users, you need to add these flags as well:
 ```
     - --oidc-groups-claim=groups
     - --oidc-username-claim=email
 ```
+
+CLI v2 works regarless, as it authenticates with ctrl plane.

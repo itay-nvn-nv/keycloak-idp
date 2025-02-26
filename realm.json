@@ -1,9 +1,9 @@
 {
-    "realm": "idp-runai-backend",
+    "realm": "mock-idp",
     "enabled": true,
     "users": [
       {
-        "email": "john.doe@example.com",
+        "email": "john.doe@acme.zzz",
         "username": "john.doe",
         "enabled": true,
         "firstName": "John",
@@ -19,7 +19,7 @@
         "emailVerified": true
       },
       {
-        "email": "jane.smith@example.com",
+        "email": "jane.smith@acme.zzz",
         "username": "jane.smith",
         "enabled": true,
         "firstName": "Jane",
@@ -35,11 +35,11 @@
         "emailVerified": true
       },
       {
-        "email": "itzik@example.com",
-        "username": "itzikitzik",
+        "email": "steve.johnson@acme.zzz",
+        "username": "steve.johnson",
         "enabled": true,
-        "firstName": "Itz",
-        "lastName": "Ick",
+        "firstName": "Steve",
+        "lastName": "Johnson",
         "credentials": [
           {
             "type": "password",
@@ -51,7 +51,7 @@
         "emailVerified": true
       },
       {
-        "email": "jacky.fox@example.com",
+        "email": "jacky.fox@acme.zzz",
         "username": "jacky.fox",
         "enabled": true,
         "firstName": "Jacky",
@@ -67,7 +67,7 @@
         "emailVerified": true
       },
       {
-        "email": "blip.blop@example.com",
+        "email": "blip.blop@acme.zzz",
         "username": "blip.blop",
         "enabled": true,
         "firstName": "Blip",

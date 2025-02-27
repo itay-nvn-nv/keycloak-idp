@@ -23,7 +23,7 @@ Can be modified in the `realm.json` file as needed.
 
 ## Instructions for standalone keycloak installation
 
-### install keyclaok
+### install keycloak
 
 **1) create keycloak namespace**
 ```bash
@@ -69,7 +69,8 @@ kubectl -n keycloak create configmap keycloak-realm-data \
 
 **2) create secret for runai values**
 
-modify the file `runai-ctrl-plane-data-secret.yaml` as needed and apply:
+edit `runai-ctrl-plane-data-secret.yaml`, provide required data, then apply:
+
 ```bash
 kubectl apply -f runai-ctrl-plane-data-secret.yaml
 ```
@@ -77,7 +78,7 @@ kubectl apply -f runai-ctrl-plane-data-secret.yaml
 **3) apply the post install job**
 
 ```bash
-kubectl -n keycloak apply -f job_standalone.yaml
+kubectl apply -f job_standalone.yaml
 ```
 
 verify the job pod is complete.
@@ -93,7 +94,8 @@ kubectl -n runai-backend get pod keycloak-0
 
 **2) check keycloak URL is accessible**
 ```bash
-kubectl -n runai-backend get ingress runai-backend-ingress -o jsonpath='{.spec.rules[0].host}'
+RUNAI_BACKEND_KEYCLOAK_URL="https://$(kubectl -n runai-backend get ingress runai-backend-ingress -o jsonpath='{.spec.rules[0].host}')/auth"
+echo $RUNAI_BACKEND_KEYCLOAK_URL
 ```
 
 ### Run the post-install script
@@ -106,7 +108,8 @@ kubectl -n runai-backend create configmap keycloak-realm-data \
 
 **2) create secret for runai values**
 
-modify the file `runai-ctrl-plane-data-secret.yaml` as needed and apply:
+edit `runai-ctrl-plane-data-secret.yaml`, provide required data, then apply:
+
 ```bash
 kubectl apply -f runai-ctrl-plane-data-secret.yaml
 ```

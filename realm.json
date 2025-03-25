@@ -1,6 +1,19 @@
 {
   "realm": "mock-idp",
   "enabled": true,
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"UID\",\"displayName\":\"User ID\",\"validations\":{\"integer\":{\"min\":\"3000\",\"max\":\"4000\"}},\"annotations\":{},\"required\":{\"roles\":[\"admin\",\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"GID\",\"displayName\":\"Group ID\",\"validations\":{\"integer\":{\"min\":\"6000\",\"max\":\"7000\"}},\"annotations\":{},\"required\":{\"roles\":[\"admin\",\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
+          ]
+        }
+      }
+    ]
+  },
   "users": [
     {
       "email": "john.doe@acme.zzz",
@@ -17,7 +30,7 @@
       ],
       "groups": ["admin-group"],
       "emailVerified": true,
-      "attributes": { "UID": "301", "GID": "601" }
+      "attributes": { "UID": "3010", "GID": "6010" }
     },
     {
       "email": "jane.smith@acme.zzz",
@@ -34,7 +47,7 @@
       ],
       "groups": ["developer-group"],
       "emailVerified": true,
-      "attributes": { "UID": "302", "GID": "602" }
+      "attributes": { "UID": "3020", "GID": "6020" }
     },
     {
       "email": "steve.johnson@acme.zzz",
@@ -51,7 +64,7 @@
       ],
       "groups": ["read-only-group"],
       "emailVerified": true,
-      "attributes": { "UID": "303", "GID": "603" }
+      "attributes": { "UID": "3030", "GID": "6030" }
     },
     {
       "email": "jacky.fox@acme.zzz",
@@ -68,7 +81,7 @@
       ],
       "groups": ["read-only-group"],
       "emailVerified": true,
-      "attributes": { "UID": "304", "GID": "604" }
+      "attributes": { "UID": "3040", "GID": "6040" }
     },
     {
       "email": "blip.blop@acme.zzz",
@@ -85,21 +98,21 @@
       ],
       "groups": ["read-only-group"],
       "emailVerified": true,
-      "attributes": { "UID": "305", "GID": "605" }
+      "attributes": { "UID": "3050", "GID": "6050" }
     }
   ],
   "groups": [
     {
       "name": "admin-group",
-      "attributes": { "GID": ["651"] }
+      "attributes": { "GID": ["6510"] }
     },
     {
       "name": "developer-group",
-      "attributes": { "GID": ["652"] }
+      "attributes": { "GID": ["6520"] }
     },
     {
       "name": "read-only-group",
-      "attributes": { "GID": ["653"] }
+      "attributes": { "GID": ["6530"] }
     }
   ],
   "clients": [

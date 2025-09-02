@@ -139,30 +139,89 @@ spec:
 
             REALM_NAME=$(jq -r '.realm' /shared-files/realm_updated.json)
             echo "REALM_NAME: $REALM_NAME"
-            ENTITY_ID=$(jq -r '.clients[1].clientId' /shared-files/realm_updated.json)
-            echo "ENTITY_ID: $ENTITY_ID"
-            XML_METADATA_URL="$KC_HOSTNAME/realms/$REALM_NAME/protocol/saml/descriptor"
-            echo "XML_METADATA_URL: $XML_METADATA_URL"
 
-            curl -s -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
-            --header 'accept: application/json, text/plain, */*' \
-            --header 'accept-language: en-US,en;q=0.9' \
-            --header 'Content-Type: application/json' \
-            --header "authorization: Bearer $RUNAI_TOKEN" \
-            --data-raw "{
-                \"mappers\": {
-                    \"uid\": \"UID\",
-                    \"gid\": \"GID\",
-                    \"groups\": \"GROUPS\",
-                    \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
-                    \"email\": \"email\"},
-                \"type\": \"saml\",
-                \"samlData\": {
-                    \"metadataXmlUrl\": \"$XML_METADATA_URL\",
-                    \"metadataXmlFile\": \"\",
-                    \"fileName\": \"\",
-                    \"metadataXmlType\": \"url\"}
-            }"
+            # Check RUNAI_IDP_TYPE environment variable
+            echo "RUNAI_IDP_TYPE: $RUNAI_IDP_TYPE"
+            
+            if [ "$RUNAI_IDP_TYPE" = "OIDC" ]; then
+              echo "Creating OIDC IDP..."
+              
+              # Get OIDC client data
+              OIDC_CLIENT_ID=$(jq -r '.clients[0].clientId' /shared-files/realm_updated.json)
+              echo "OIDC_CLIENT_ID: $OIDC_CLIENT_ID"
+              
+              # For OIDC, we need to get the client secret from Keycloak
+              source /shared-files/env-vars.sh
+              CLIENT_SECRET=$(curl -s "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients" \
+                -H "authorization: Bearer $KEYCLOAK_TOKEN" | \
+                jq -r ".[] | select(.clientId==\"$OIDC_CLIENT_ID\") | .id" | \
+                xargs -I {} curl -s "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients/{}/client-secret" \
+                -H "authorization: Bearer $KEYCLOAK_TOKEN" | \
+                jq -r '.value')
+              echo "Retrieved client secret for OIDC client"
+              
+              DISCOVER_DOCUMENT_URL="$KC_HOSTNAME/realms/$REALM_NAME/.well-known/openid-configuration"
+              echo "DISCOVER_DOCUMENT_URL: $DISCOVER_DOCUMENT_URL"
+
+              curl -s -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
+              --header 'accept: application/json, text/plain, */*' \
+              --header 'accept-language: en-US,en;q=0.9' \
+              --header 'Content-Type: application/json' \
+              --header "authorization: Bearer $RUNAI_TOKEN" \
+              --data-raw "{
+                  \"type\": \"oidc\",
+                  \"oidcData\": {
+                      \"discoverDocumentUrl\": \"$DISCOVER_DOCUMENT_URL\",
+                      \"clientId\": \"$OIDC_CLIENT_ID\",
+                      \"clientSecret\": \"$CLIENT_SECRET\",
+                      \"scopes\": [
+                          \"openid\"
+                      ],
+                      \"mandatoryClaim\": null
+                  },
+                  \"mappers\": {
+                      \"uid\": \"UID\",
+                      \"gid\": \"GID\",
+                      \"groups\": \"GROUPS\",
+                      \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
+                      \"email\": \"email\"
+                  }
+              }"
+              
+            elif [ "$RUNAI_IDP_TYPE" = "SAML" ]; then
+              echo "Creating SAML IDP..."
+              
+              ENTITY_ID=$(jq -r '.clients[1].clientId' /shared-files/realm_updated.json)
+              echo "ENTITY_ID: $ENTITY_ID"
+              XML_METADATA_URL="$KC_HOSTNAME/realms/$REALM_NAME/protocol/saml/descriptor"
+              echo "XML_METADATA_URL: $XML_METADATA_URL"
+
+              curl -s -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
+              --header 'accept: application/json, text/plain, */*' \
+              --header 'accept-language: en-US,en;q=0.9' \
+              --header 'Content-Type: application/json' \
+              --header "authorization: Bearer $RUNAI_TOKEN" \
+              --data-raw "{
+                  \"mappers\": {
+                      \"uid\": \"UID\",
+                      \"gid\": \"GID\",
+                      \"groups\": \"GROUPS\",
+                      \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
+                      \"email\": \"email\"},
+                  \"type\": \"saml\",
+                  \"samlData\": {
+                      \"metadataXmlUrl\": \"$XML_METADATA_URL\",
+                      \"metadataXmlFile\": \"\",
+                      \"fileName\": \"\",
+                      \"metadataXmlType\": \"url\"}
+              }"
+              
+            else
+              echo "ERROR: Invalid RUNAI_IDP_TYPE value: '$RUNAI_IDP_TYPE'"
+              echo "RUNAI_IDP_TYPE must be either 'OIDC' or 'SAML'"
+              echo "Please set the RUNAI_IDP_TYPE environment variable to a valid value"
+              exit 1
+            fi
 
             # get cluster + department ID's
             CLUSTER_DATA=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/departments" \

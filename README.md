@@ -12,14 +12,29 @@ Post install script does the following:
 - integrates the IDP SAML client with a self-hosted Run:AI ctrl plane
 - creates a project in the self-hosted Run:AI ctrl plane, and a corresponding access rule that grants permission to the `developer-group` SSO group
 
-**Main stock users:**
+**Pre-configured Users:**
 
-| email | password | group |
+| Name | Email | Username | Password | Group | UID | GID |
+|--|--|--|--|--|--|--|
+| John Doe | `john.doe@acme.zzz` | `john.doe` | `123456` | `admin-group` | 3010 | 6010 |
+| Jane Smith | `jane.smith@acme.zzz` | `jane.smith` | `123456` | `developer-group` | 3020 | 6020 |
+| Steve Johnson | `steve.johnson@acme.zzz` | `steve.johnson` | `123456` | `read-only-group` | 3030 | 6030 |
+| Jacky Fox | `jacky.fox@acme.zzz` | `jacky.fox` | `123456` | `read-only-group` | 3040 | 6040 |
+| Blip Blop | `blip.blop@acme.zzz` | `blip.blop` | `123456` | `read-only-group` | 3050 | 6050 |
+
+**Available Groups:**
+
+| Group Name | Group GID | Description |
 |--|--|--|
-| `john.doe@acme.zzz` | `123456` | `admin-group` |
-| `jane.smith@acme.zzz` | `123456` | `developer-group` |
+| `admin-group` | 6510 | Full administrative access |
+| `developer-group` | 6520 | Development team access (has RunAI project permissions) |
+| `read-only-group` | 6530 | Read-only access |
 
-Can be modified in the `realm.json` file as needed.
+**Notes:**
+- All users have verified email addresses and are enabled by default
+- User UIDs range from 3010-3050, Group GIDs range from 6010-6050 (individual), 6510-6530 (groups)
+- The `developer-group` gets automatic access to the "dev-team" project created by the post-install script
+- User and group configurations can be modified in the `realm.json` file as needed
 
 ## Instructions for standalone keycloak installation
 

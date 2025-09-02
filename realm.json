@@ -128,7 +128,50 @@
       "attributes": {
         "post.logout.redirect.uris": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/*"
       },
-      "standardFlowEnabled": true
+      "standardFlowEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "Groups Mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "GROUPS",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "UID Mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "UID",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "UID",
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "GID Mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "GID",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "GID",
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String"
+          }
+        }
+      ]
     },
     {
       "protocol": "saml",

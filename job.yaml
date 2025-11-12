@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-idp-setup
+  namespace: runai-backend
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+      # Init Container 1: Health Check
+      - name: url-health-check
+        image: wbitt/network-multitool
+        envFrom:
+          - secretRef:
+              name: runai-ctrl-plane-data
+          - configMapRef:
+              name: runai-backend-keycloakx
+        command: ["/scripts/01-url-health-check.sh"]
+        volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+            readOnly: true
+      
+      # Init Container 2: Keycloak Setup (Token + Realm Import)
+      - name: keycloak-setup
+        image: wbitt/network-multitool
+        envFrom:
+          - secretRef:
+              name: runai-ctrl-plane-data
+          - secretRef:
+              name: runai-backend-keycloakx
+          - configMapRef:
+              name: runai-backend-keycloakx
+        command: ["/scripts/02-keycloak-setup.sh"]
+        volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+            readOnly: true
+          - name: shared-volume
+            mountPath: /shared-files
+          - name: keycloak-realm-data
+            mountPath: /keycloak-realm-data
+            readOnly: true
+      
+      # Init Container 3: Run:AI Setup (Token + IDP + Project + Rules)
+      - name: runai-setup
+        image: wbitt/network-multitool
+        envFrom:
+          - secretRef:
+              name: runai-ctrl-plane-data
+          - configMapRef:
+              name: runai-backend-keycloakx
+        command: ["/scripts/03-runai-setup.sh"]
+        volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+            readOnly: true
+          - name: shared-volume
+            mountPath: /shared-files
+      
+      # Main container (required by Job spec)
+      containers:
+      - name: main-container
+        image: wbitt/network-multitool
+        command: ["sh", "-c", "echo 'Setup complete!'"]
+      
+      volumes:
+      - name: scripts
+        configMap:
+          name: keycloak-scripts
+          defaultMode: 0755
+      - name: shared-volume
+        emptyDir: {}
+      - name: keycloak-realm-data
+        configMap:
+          name: keycloak-realm-data

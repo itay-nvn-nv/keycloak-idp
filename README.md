@@ -3,16 +3,76 @@
 Turnkey IDP for Run:AI
 
 ## Description
-installs/connects to keycloak, according to the option chose:
-- **runai-backend** connects to the existing keycloak in runai-backend namespace.
-- **standalone** installs a new, separate keycloak instance.
 
-Post install script does the following:
-- creates an "IDP": creates realm/users/groups/clients in the keycloak instance, turning it into an independent, customizable IDP
-- integrates the IDP SAML client with a self-hosted Run:AI ctrl plane
-- creates a project in the self-hosted Run:AI ctrl plane, and a corresponding access rule that grants permission to the `developer-group` SSO group
+This repository provides an automated setup for integrating Keycloak as an Identity Provider (IDP) with Run:AI. It connects to the existing Keycloak instance in the `runai-backend` namespace and configures it for SSO authentication.
 
-**Pre-configured Users:**
+The automated setup script performs the following operations:
+
+1. **Creates a complete IDP configuration** - Imports a pre-configured Keycloak realm (`mock-idp`) with:
+   - 5 demo users across different permission levels
+   - 3 groups (admin, developer, read-only) with proper GID mappings
+   - OIDC and SAML clients configured for Run:AI integration
+   - Custom attribute mappers for UID, GID, and group memberships
+
+2. **Integrates with Run:AI Control Plane** - Establishes the IDP connection using either:
+   - **OIDC** (OpenID Connect) - Modern, token-based authentication
+   - **SAML** - Enterprise-standard SSO protocol
+   
+   The integration enables users to authenticate to Run:AI using their IDP credentials.
+
+3. **Sets up access control** - Creates a sample project (`dev-team`) and configures an access rule that grants the `developer-group` automatic permissions, demonstrating how SSO groups can be mapped to Run:AI project permissions.
+
+After setup, users can log into Run:AI using their IDP credentials (e.g., `jane.smith@acme.zzz` / `123456`) with group-based access control automatically enforced.
+
+## Setup
+
+To set up the Keycloak IDP, run the automated setup script:
+
+```bash
+./setup.sh
+```
+
+The script will:
+1. Verify the Keycloak instance is running
+2. Create ConfigMaps for realm data and setup scripts
+3. Automatically gather Run:AI credentials from your cluster
+4. Prompt you to select the IDP type (OIDC or SAML)
+5. Create the required Secret
+6. Apply and monitor the post-install job
+
+### Non-interactive mode
+
+You can also run the script non-interactively by setting the `RUNAI_IDP_TYPE` environment variable:
+
+```bash
+RUNAI_IDP_TYPE=OIDC ./setup.sh
+# or
+RUNAI_IDP_TYPE=SAML ./setup.sh
+```
+
+---
+
+## Architecture
+
+The setup uses a Kubernetes Job with 3 init containers that run sequentially:
+
+1. **url-health-check** - Verifies Keycloak and Run:AI control plane are accessible
+2. **keycloak-setup** - Authenticates with Keycloak and imports the realm configuration
+3. **runai-setup** - Creates the IDP, project, and access rules in Run:AI
+
+All setup scripts are maintained as separate shell files in the `scripts/` directory and mounted into the job via ConfigMap. This provides:
+- Better maintainability with proper syntax highlighting
+- Independent testing and linting of scripts
+- Clear separation of concerns
+- Easy debugging with readable logs per container
+
+The job is **idempotent** - it can be run multiple times safely as it checks for existing resources before creating them.
+
+## Pre-configured Users and Groups
+
+The realm includes pre-configured users and groups defined in `realm.json`. You can modify these as needed before running the setup.
+
+### Users
 
 | Name | Email | Username | Password | Group | UID | GID |
 |--|--|--|--|--|--|--|
@@ -22,7 +82,7 @@ Post install script does the following:
 | Jacky Fox | `jacky.fox@acme.zzz` | `jacky.fox` | `123456` | `read-only-group` | 3040 | 6040 |
 | Blip Blop | `blip.blop@acme.zzz` | `blip.blop` | `123456` | `read-only-group` | 3050 | 6050 |
 
-**Available Groups:**
+### Groups
 
 | Group Name | Group GID | Description |
 |--|--|--|
@@ -30,114 +90,15 @@ Post install script does the following:
 | `developer-group` | 6520 | Development team access (has RunAI project permissions) |
 | `read-only-group` | 6530 | Read-only access |
 
-**Notes:**
+### Notes
+
 - All users have verified email addresses and are enabled by default
 - User UIDs range from 3010-3050, Group GIDs range from 6010-6050 (individual), 6510-6530 (groups)
 - The `developer-group` gets automatic access to the "dev-team" project created by the post-install script
 - User and group configurations can be modified in the `realm.json` file as needed
 
-## Instructions for standalone keycloak installation
+## CLI v1 Support (Optional)
 
-### install keycloak
-
-**1) create keycloak namespace**
-```bash
-kubectl create namespace keycloak
-```
-
-**2) duplicate TLS secret** (requires `yq` utility)
-```bash
-kubectl -n runai get secret runai-cluster-domain-tls-secret -o yaml | \
-yq eval '
-  .metadata.namespace = "keycloak" |
-  del(.metadata.creationTimestamp) |
-  del(.metadata.resourceVersion) |
-  del(.metadata.selfLink) |
-  del(.metadata.uid)
-' - | \
-kubectl apply -f -
-```
-
-**3) modify keycloak helm chart values file**
-
-edit the `keycloak_helm_values.yaml` file, follow the commented instructions in order to configure the keycloak ingress according to your environment.
-
-**4) install keycloak**
-```bash
-helm install keycloak bitnami/keycloak \
--n keycloak \
--f keycloak_helm_values.yaml \
---debug
-```
-before moving to next step, verify
-- installation is complete
-- pods are in running state
-- keycloak URL is accessible
-
-### Run the post-install script
-
-**1) create configmap for keycloak realm data:**
-```bash
-kubectl -n keycloak create configmap keycloak-realm-data \
---from-file realm.json
-```
-
-**2) create secret for runai values**
-
-edit `runai-ctrl-plane-data-secret.yaml`, provide required data, then apply:
-
-```bash
-kubectl apply -f runai-ctrl-plane-data-secret.yaml
-```
-
-**3) apply the post install job**
-
-```bash
-kubectl apply -f job_standalone.yaml
-```
-
-verify the job pod is complete.
-
-## Instructions for integartion with runai-backend keycloak instance
-
-### Verify keycloak instance
-
-**1) check keycloak pod is running:**
-```bash
-kubectl -n runai-backend get pod keycloak-0
-```
-
-**2) check keycloak URL is accessible**
-```bash
-RUNAI_BACKEND_KEYCLOAK_URL="https://$(kubectl -n runai-backend get ingress runai-backend-ingress -o jsonpath='{.spec.rules[0].host}')/auth"
-echo $RUNAI_BACKEND_KEYCLOAK_URL
-```
-
-### Run the post-install script
-
-**1) create configmap for keycloak realm data:**
-```bash
-kubectl -n runai-backend create configmap keycloak-realm-data \
---from-file realm.json
-```
-
-**2) create secret for runai values**
-
-edit `runai-ctrl-plane-data-secret.yaml`, provide required data, then apply:
-
-```bash
-kubectl apply -f runai-ctrl-plane-data-secret.yaml
-```
-
-**3) apply the post install job**
-
-```bash
-kubectl apply -f job_runai-backend.yaml
-```
-
-verify the job pod is complete.
-
-### CLI v1 support (OPTIONAL)
 env-in-a-click self-hosted clusters come pre-packaged with OIDC flags in the kube-apiserver deployment:
 ```
     - --oidc-client-id=runai
@@ -151,4 +112,4 @@ But if you want to use CLI v1 with the SSO users, you need to add OIDC group fla
     - --oidc-username-claim=email
 ```
 
-**CLI v2 works regarless, as it authenticates with ctrl plane.**
+**CLI v2 works regardless, as it authenticates with ctrl plane.**

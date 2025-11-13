@@ -72,7 +72,7 @@ confirm_cleanup() {
     print_warning "This script will DELETE the following resources:"
     echo ""
     echo "  Kubernetes Resources (namespace: runai-backend):"
-    echo "    - Job: keycloak-post-install"
+    echo "    - Job: keycloak-idp-setup"
     echo "    - ConfigMap: keycloak-realm-data"
     echo "    - ConfigMap: keycloak-scripts"
     echo "    - Secret: runai-ctrl-plane-data"
@@ -157,17 +157,24 @@ delete_runai_resources() {
     
     # Authenticate with Run:AI
     print_info "Authenticating with Run:AI..."
-    RUNAI_TOKEN=$(curl -s -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
+    TOKEN_RESPONSE=$(curl -s -f -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
         --header 'accept: application/json, text/plain, */*' \
         --header 'Content-Type: application/json' \
         --data-raw "{
             \"grantType\": \"password\",
             \"clientID\": \"cli\",
             \"username\": \"$RUNAI_ADMIN_USERNAME\",
-            \"password\": \"$RUNAI_ADMIN_PASSWORD\"}" 2>/dev/null | jq -r .accessToken)
+            \"password\": \"$RUNAI_ADMIN_PASSWORD\"}" 2>&1) || {
+        print_error "Failed to connect to Run:AI API"
+        print_warning "Skipping Run:AI resource cleanup"
+        return
+    }
     
-    if [ -z "$RUNAI_TOKEN" ] || [ "$RUNAI_TOKEN" = "null" ]; then
+    RUNAI_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.accessToken // empty' 2>/dev/null)
+    
+    if [ -z "$RUNAI_TOKEN" ]; then
         print_error "Failed to authenticate with Run:AI"
+        print_warning "Response: $TOKEN_RESPONSE"
         print_warning "Skipping Run:AI resource cleanup"
         return
     fi
@@ -179,7 +186,18 @@ delete_runai_resources() {
     EXISTING_PROJECTS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
-    PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.[] | select(.name=="dev-team") | .id')
+    # Handle both array and object responses
+    if echo "$EXISTING_PROJECTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.[] | select(.name=="dev-team") | .id // empty')
+    else
+        # Response might be wrapped in an object
+        PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.projects[]? | select(.name=="dev-team") | .id // empty')
+        
+        # Try other common patterns
+        if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.data[]? | select(.name=="dev-team") | .id // empty')
+        fi
+    fi
     
     if [ -n "$PROJECT_ID" ] && [ "$PROJECT_ID" != "null" ]; then
         # Delete access rules for this project
@@ -187,7 +205,16 @@ delete_runai_resources() {
         EXISTING_RULES=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
-        RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\") | .id")
+        # Handle both array and object responses
+        if echo "$EXISTING_RULES" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\") | .id")
+        else
+            RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".rules[]? | select(.scopeId==\"$PROJECT_ID\") | .id")
+            
+            if [ -z "$RULE_IDS" ]; then
+                RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".data[]? | select(.scopeId==\"$PROJECT_ID\") | .id")
+            fi
+        fi
         
         if [ -n "$RULE_IDS" ]; then
             while IFS= read -r rule_id; do
@@ -227,11 +254,12 @@ delete_runai_resources() {
     IDP_LIST=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
-    IDP_ID=$(echo "$IDP_LIST" | jq -r '.[0].id // empty')
+    IDP_ALIAS=$(echo "$IDP_LIST" | jq -r '.[0].alias // empty' 2>/dev/null)
     
-    if [ -n "$IDP_ID" ] && [ "$IDP_ID" != "null" ]; then
+    if [ -n "$IDP_ALIAS" ] && [ "$IDP_ALIAS" != "null" ]; then
+        print_info "Found IDP with alias: $IDP_ALIAS"
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-            "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$IDP_ID" \
+            "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$IDP_ALIAS" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
         if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
@@ -255,15 +283,22 @@ delete_keycloak_realm() {
     
     # Authenticate with Keycloak
     print_info "Authenticating with Keycloak..."
-    KEYCLOAK_TOKEN=$(curl -s -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
+    KC_RESPONSE=$(curl -s -f -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "username=$KEYCLOAK_ADMIN" \
         -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
         -d 'grant_type=password' \
-        -d 'client_id=admin-cli' 2>/dev/null | jq -r '.access_token')
+        -d 'client_id=admin-cli' 2>&1) || {
+        print_error "Failed to connect to Keycloak API"
+        print_warning "Skipping Keycloak realm cleanup"
+        return
+    }
     
-    if [ -z "$KEYCLOAK_TOKEN" ] || [ "$KEYCLOAK_TOKEN" = "null" ]; then
+    KEYCLOAK_TOKEN=$(echo "$KC_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
+    
+    if [ -z "$KEYCLOAK_TOKEN" ]; then
         print_error "Failed to authenticate with Keycloak"
+        print_warning "Response: $(echo $KC_RESPONSE | head -c 200)"
         print_warning "Skipping Keycloak realm cleanup"
         return
     fi
@@ -290,9 +325,9 @@ delete_kubernetes_resources() {
     print_section "Deleting Kubernetes Resources"
     
     # Delete job
-    print_info "Deleting job 'keycloak-post-install'..."
-    if kubectl -n runai-backend get job keycloak-post-install &>/dev/null; then
-        kubectl -n runai-backend delete job keycloak-post-install
+    print_info "Deleting job 'keycloak-idp-setup'..."
+    if kubectl -n runai-backend get job keycloak-idp-setup &>/dev/null; then
+        kubectl -n runai-backend delete job keycloak-idp-setup
         print_success "Deleted job"
     else
         print_info "Job not found (already deleted or never created)"
@@ -362,8 +397,10 @@ main() {
     confirm_cleanup
     get_runai_credentials
     get_keycloak_credentials
+    # Delete cloud resources BEFORE deleting k8s resources (which contain credentials)
     delete_runai_resources
     delete_keycloak_realm
+    # Delete k8s resources last
     delete_kubernetes_resources
     display_summary
 }

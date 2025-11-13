@@ -177,7 +177,18 @@ echo "Checking if 'dev-team' project already exists..."
 EXISTING_PROJECTS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 
-PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.[] | select(.name=="dev-team") | .id')
+# Handle both array and object responses
+if echo "$EXISTING_PROJECTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.[] | select(.name=="dev-team") | .id // empty')
+else
+  # Response might be wrapped in an object like {"projects": [...]}
+  PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.projects[]? | select(.name=="dev-team") | .id // empty')
+  
+  # If still empty, try other common patterns
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+    PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.data[]? | select(.name=="dev-team") | .id // empty')
+  fi
+fi
 
 if [ -n "$PROJECT_ID" ] && [ "$PROJECT_ID" != "null" ]; then
   echo "✓ Project 'dev-team' already exists with ID: $PROJECT_ID"
@@ -231,7 +242,16 @@ echo "Checking if access rule already exists..."
 EXISTING_RULES=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 
-RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id")
+# Handle both array and object responses
+if echo "$EXISTING_RULES" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
+else
+  RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".rules[]? | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
+  
+  if [ -z "$RULE_EXISTS" ] || [ "$RULE_EXISTS" = "null" ]; then
+    RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".data[]? | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
+  fi
+fi
 
 if [ -n "$RULE_EXISTS" ] && [ "$RULE_EXISTS" != "null" ]; then
   echo "✓ Access rule for 'developer-group' already exists. Skipping."

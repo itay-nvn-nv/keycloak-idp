@@ -50,6 +50,21 @@ RUNAI_IDP_TYPE=OIDC ./setup.sh
 RUNAI_IDP_TYPE=SAML ./setup.sh
 ```
 
+## Cleanup
+
+To remove all resources created by the setup and restore the environment to its previous state:
+
+```bash
+./cleanup.sh
+```
+
+The cleanup script will:
+1. Delete the Run:AI access rules, project, and IDP configuration
+2. Delete the Keycloak realm (`mock-idp`) including all users and groups
+3. Delete the Kubernetes resources (Job, ConfigMaps, Secret)
+
+**Note:** You will be prompted to confirm before any resources are deleted. This operation cannot be undone.
+
 ---
 
 ## Architecture

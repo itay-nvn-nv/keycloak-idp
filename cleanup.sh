@@ -157,7 +157,7 @@ delete_runai_resources() {
     
     # Authenticate with Run:AI
     print_info "Authenticating with Run:AI..."
-    TOKEN_RESPONSE=$(curl -s -f -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
+    TOKEN_RESPONSE=$(curl -s -f --connect-timeout 10 --max-time 30 -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
         --header 'accept: application/json, text/plain, */*' \
         --header 'Content-Type: application/json' \
         --data-raw "{
@@ -183,7 +183,7 @@ delete_runai_resources() {
     
     # Get project ID
     print_info "Looking for 'dev-team' project..."
-    EXISTING_PROJECTS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
+    EXISTING_PROJECTS=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
     # Handle both array and object responses
@@ -202,7 +202,7 @@ delete_runai_resources() {
     if [ -n "$PROJECT_ID" ] && [ "$PROJECT_ID" != "null" ]; then
         # Delete access rules for this project
         print_info "Deleting access rules for project 'dev-team'..."
-        EXISTING_RULES=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
+        EXISTING_RULES=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
         # Handle both array and object responses
@@ -219,7 +219,7 @@ delete_runai_resources() {
         if [ -n "$RULE_IDS" ]; then
             while IFS= read -r rule_id; do
                 if [ -n "$rule_id" ] && [ "$rule_id" != "null" ]; then
-                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+                    HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
                         "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules/$rule_id" \
                         -H "authorization: Bearer $RUNAI_TOKEN")
                     
@@ -236,7 +236,7 @@ delete_runai_resources() {
         
         # Delete project
         print_info "Deleting project 'dev-team'..."
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+        HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
             "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects/$PROJECT_ID" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
@@ -251,14 +251,14 @@ delete_runai_resources() {
     
     # Delete IDP
     print_info "Deleting IDP configuration..."
-    IDP_LIST=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
+    IDP_LIST=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
     IDP_ALIAS=$(echo "$IDP_LIST" | jq -r '.[0].alias // empty' 2>/dev/null)
     
     if [ -n "$IDP_ALIAS" ] && [ "$IDP_ALIAS" != "null" ]; then
         print_info "Found IDP with alias: $IDP_ALIAS"
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+        HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
             "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$IDP_ALIAS" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
@@ -283,7 +283,7 @@ delete_keycloak_realm() {
     
     # Authenticate with Keycloak
     print_info "Authenticating with Keycloak..."
-    KC_RESPONSE=$(curl -s -f -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
+    KC_RESPONSE=$(curl -s -f --connect-timeout 10 --max-time 30 -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "username=$KEYCLOAK_ADMIN" \
         -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
@@ -307,7 +307,7 @@ delete_keycloak_realm() {
     
     # Delete realm
     print_info "Deleting realm 'mock-idp'..."
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
         "$KC_HOSTNAME/admin/realms/mock-idp" \
         -H "authorization: Bearer $KEYCLOAK_TOKEN")
     
@@ -327,8 +327,13 @@ delete_kubernetes_resources() {
     # Delete job
     print_info "Deleting job 'keycloak-idp-setup'..."
     if kubectl -n runai-backend get job keycloak-idp-setup &>/dev/null; then
-        kubectl -n runai-backend delete job keycloak-idp-setup
-        print_success "Deleted job"
+        if kubectl -n runai-backend delete job keycloak-idp-setup --timeout=60s; then
+            print_success "Deleted job"
+        else
+            print_warning "Job deletion timed out, forcing deletion..."
+            kubectl -n runai-backend delete job keycloak-idp-setup --force --grace-period=0 2>/dev/null || true
+            print_success "Force-deleted job"
+        fi
     else
         print_info "Job not found (already deleted or never created)"
     fi
@@ -336,7 +341,7 @@ delete_kubernetes_resources() {
     # Delete ConfigMaps
     print_info "Deleting ConfigMap 'keycloak-realm-data'..."
     if kubectl -n runai-backend get configmap keycloak-realm-data &>/dev/null; then
-        kubectl -n runai-backend delete configmap keycloak-realm-data
+        kubectl -n runai-backend delete configmap keycloak-realm-data --timeout=30s
         print_success "Deleted ConfigMap 'keycloak-realm-data'"
     else
         print_info "ConfigMap 'keycloak-realm-data' not found"
@@ -344,7 +349,7 @@ delete_kubernetes_resources() {
     
     print_info "Deleting ConfigMap 'keycloak-scripts'..."
     if kubectl -n runai-backend get configmap keycloak-scripts &>/dev/null; then
-        kubectl -n runai-backend delete configmap keycloak-scripts
+        kubectl -n runai-backend delete configmap keycloak-scripts --timeout=30s
         print_success "Deleted ConfigMap 'keycloak-scripts'"
     else
         print_info "ConfigMap 'keycloak-scripts' not found"
@@ -353,7 +358,7 @@ delete_kubernetes_resources() {
     # Delete Secret
     print_info "Deleting Secret 'runai-ctrl-plane-data'..."
     if kubectl -n runai-backend get secret runai-ctrl-plane-data &>/dev/null; then
-        kubectl -n runai-backend delete secret runai-ctrl-plane-data
+        kubectl -n runai-backend delete secret runai-ctrl-plane-data --timeout=30s
         print_success "Deleted Secret 'runai-ctrl-plane-data'"
     else
         print_info "Secret 'runai-ctrl-plane-data' not found"

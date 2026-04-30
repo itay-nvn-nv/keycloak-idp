@@ -258,12 +258,12 @@ apply_job() {
     fi
     
     print_info "Checking if job already exists..."
-    if kubectl -n runai-backend get job keycloak-post-install &>/dev/null; then
-        print_warning "Job 'keycloak-post-install' already exists"
+    if kubectl -n runai-backend get job keycloak-idp-setup &>/dev/null; then
+        print_warning "Job 'keycloak-idp-setup' already exists"
         read -p "Do you want to delete and recreate it? (y/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            kubectl -n runai-backend delete job keycloak-post-install
+            kubectl -n runai-backend delete job keycloak-idp-setup
             print_success "Deleted existing job"
             # Wait a moment for the job to be fully deleted
             sleep 2
@@ -278,64 +278,114 @@ apply_job() {
     print_success "Job applied successfully"
 }
 
+# Function to get the pod name for the job
+get_job_pod() {
+    kubectl -n runai-backend get pods -l job-name=keycloak-idp-setup -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+# Function to wait for a container to reach a terminal or running state, then stream its logs
+stream_container_logs() {
+    local pod_name="$1"
+    local container="$2"
+    local is_init="$3"
+    local timeout=300
+    local elapsed=0
+
+    print_info "Waiting for container '$container' to start..."
+
+    while [ $elapsed -lt $timeout ]; do
+        local state=""
+        if [ "$is_init" = "true" ]; then
+            state=$(kubectl -n runai-backend get pod "$pod_name" -o jsonpath="{.status.initContainerStatuses[?(@.name==\"$container\")].state}" 2>/dev/null)
+        else
+            state=$(kubectl -n runai-backend get pod "$pod_name" -o jsonpath="{.status.containerStatuses[?(@.name==\"$container\")].state}" 2>/dev/null)
+        fi
+
+        if echo "$state" | grep -q "running\|terminated"; then
+            break
+        fi
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    if [ $elapsed -ge $timeout ]; then
+        print_error "Container '$container' did not start within $timeout seconds"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${YELLOW}--- [$container] logs ---${NC}"
+    kubectl -n runai-backend logs "$pod_name" -c "$container" -f 2>/dev/null || true
+    echo -e "${YELLOW}--- [$container] end ---${NC}"
+    echo ""
+
+    # Check exit code
+    local exit_code=""
+    if [ "$is_init" = "true" ]; then
+        exit_code=$(kubectl -n runai-backend get pod "$pod_name" -o jsonpath="{.status.initContainerStatuses[?(@.name==\"$container\")].state.terminated.exitCode}" 2>/dev/null)
+    else
+        exit_code=$(kubectl -n runai-backend get pod "$pod_name" -o jsonpath="{.status.containerStatuses[?(@.name==\"$container\")].state.terminated.exitCode}" 2>/dev/null)
+    fi
+
+    if [ "$exit_code" = "0" ]; then
+        print_success "Container '$container' completed successfully"
+    elif [ -n "$exit_code" ]; then
+        print_error "Container '$container' failed with exit code $exit_code"
+        exit 1
+    fi
+}
+
 # Function to monitor job
 monitor_job() {
     print_section "Monitoring Job Progress"
-    
-    print_info "Waiting for job to start..."
-    local max_wait=60
+
+    local containers="url-health-check keycloak-setup runai-setup"
+
+    # Wait for the pod to be created
+    print_info "Waiting for job pod to be created..."
+    local max_wait=120
     local waited=0
-    
+    local pod_name=""
+
     while [ $waited -lt $max_wait ]; do
-        if kubectl -n runai-backend get job keycloak-post-install &>/dev/null; then
+        pod_name=$(get_job_pod)
+        if [ -n "$pod_name" ] && [ "$pod_name" != "" ]; then
             break
         fi
-        sleep 1
-        waited=$((waited + 1))
+        sleep 2
+        waited=$((waited + 2))
     done
-    
-    if [ $waited -eq $max_wait ]; then
-        print_error "Job did not start within $max_wait seconds"
+
+    if [ -z "$pod_name" ]; then
+        print_error "Job pod was not created within $max_wait seconds"
         exit 1
     fi
-    
-    print_info "Job started. Monitoring status..."
-    print_info "To view logs, run: kubectl -n runai-backend logs -f job/keycloak-post-install"
+
+    print_success "Job pod created: $pod_name"
     echo ""
-    
-    # Monitor job status
-    local timeout=600
-    local elapsed=0
-    
-    while [ $elapsed -lt $timeout ]; do
-        local status=$(kubectl -n runai-backend get job keycloak-post-install -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
-        local failed=$(kubectl -n runai-backend get job keycloak-post-install -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
-        
-        if [ "$status" == "True" ]; then
-            print_success "Job completed successfully!"
-            return 0
-        elif [ "$failed" == "True" ]; then
-            print_error "Job failed!"
-            print_info "Fetching job logs..."
-            echo ""
-            kubectl -n runai-backend logs job/keycloak-post-install --tail=50
-            exit 1
-        fi
-        
-        # Show progress
-        local active=$(kubectl -n runai-backend get job keycloak-post-install -o jsonpath='{.status.active}' 2>/dev/null)
-        if [ -n "$active" ] && [ "$active" != "0" ]; then
-            printf "\r${BLUE}[INFO]${NC} Job is running... (elapsed: ${elapsed}s)"
-        fi
-        
-        sleep 5
-        elapsed=$((elapsed + 5))
+
+    # Stream logs from each init container in order
+    for container in $containers; do
+        stream_container_logs "$pod_name" "$container" "true"
     done
-    
-    echo "" # New line after progress indicator
-    print_error "Job did not complete within $timeout seconds"
-    print_info "You can continue monitoring with: kubectl -n runai-backend get job keycloak-post-install -w"
-    exit 1
+
+    # Stream logs from the main container
+    stream_container_logs "$pod_name" "main-container" "false"
+
+    # Final job status check
+    local job_status=$(kubectl -n runai-backend get job keycloak-idp-setup -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
+    local job_failed=$(kubectl -n runai-backend get job keycloak-idp-setup -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+
+    if [ "$job_status" == "True" ]; then
+        print_success "Job completed successfully!"
+    elif [ "$job_failed" == "True" ]; then
+        print_error "Job failed!"
+        exit 1
+    else
+        print_warning "Job finished but status is unclear. Check manually:"
+        print_info "kubectl -n runai-backend get job keycloak-idp-setup"
+    fi
 }
 
 # Function to display summary
@@ -358,8 +408,8 @@ display_summary() {
     echo "  • blip.blop@acme.zzz (read-only-group)"
     echo ""
     print_info "To verify the setup:"
-    echo "  kubectl -n runai-backend get job keycloak-post-install"
-    echo "  kubectl -n runai-backend logs job/keycloak-post-install"
+    echo "  kubectl -n runai-backend get job keycloak-idp-setup"
+    echo "  kubectl -n runai-backend logs job/keycloak-idp-setup"
     echo ""
 }
 

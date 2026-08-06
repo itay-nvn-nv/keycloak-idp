@@ -109,9 +109,14 @@ get_runai_credentials() {
         RUNAI_ADMIN_PASSWORD=$(kubectl -n runai-backend get secret runai-ctrl-plane-data -o jsonpath='{.data.RUNAI_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
         RUNAI_CTRL_PLANE_URL=$(kubectl -n runai-backend get secret runai-ctrl-plane-data -o jsonpath='{.data.RUNAI_CTRL_PLANE_URL}' 2>/dev/null | base64 -d)
     else
-        print_info "Secret not found, getting from configmaps..."
+        print_info "Secret not found, getting from configmaps/secrets..."
         RUNAI_ADMIN_USERNAME=$(kubectl get configmap runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.ADMIN_USERNAME}' 2>/dev/null)
-        RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+        # Run:AI 2.26+ stores ADMIN_PASSWORD in runai-backend-credentials;
+        # older versions kept it on runai-backend-tenants-manager.
+        RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-credentials -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+        if [ -z "$RUNAI_ADMIN_PASSWORD" ]; then
+            RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+        fi
         RUNAI_CTRL_PLANE_URL=$(kubectl get configmap runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.TENANT_DOMAIN_TEMPLATE}' 2>/dev/null)
     fi
     
@@ -133,7 +138,14 @@ get_keycloak_credentials() {
     print_info "Getting Keycloak credentials..."
     KC_HOSTNAME=$(kubectl -n runai-backend get configmap runai-backend-keycloakx -o jsonpath='{.data.KC_HOSTNAME}' 2>/dev/null)
     KEYCLOAK_ADMIN=$(kubectl -n runai-backend get secret runai-backend-keycloakx -o jsonpath='{.data.KEYCLOAK_ADMIN}' 2>/dev/null | base64 -d)
-    KEYCLOAK_ADMIN_PASSWORD=$(kubectl -n runai-backend get secret runai-backend-keycloakx -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    # Prefer password from our setup secret, then Run:AI 2.26+ credentials, then legacy keycloakx.
+    KEYCLOAK_ADMIN_PASSWORD=$(kubectl -n runai-backend get secret runai-ctrl-plane-data -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+        KEYCLOAK_ADMIN_PASSWORD=$(kubectl -n runai-backend get secret runai-backend-credentials -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d)
+    fi
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+        KEYCLOAK_ADMIN_PASSWORD=$(kubectl -n runai-backend get secret runai-backend-keycloakx -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    fi
     
     if [ -z "$KC_HOSTNAME" ] || [ -z "$KEYCLOAK_ADMIN" ] || [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
         print_error "Failed to get Keycloak credentials"

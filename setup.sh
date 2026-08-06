@@ -162,7 +162,12 @@ get_runai_credentials() {
     print_success "RUNAI_ADMIN_USERNAME: $RUNAI_ADMIN_USERNAME"
     
     print_info "Getting RUNAI_ADMIN_PASSWORD..."
-    RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    # Run:AI 2.26+ stores ADMIN_PASSWORD in runai-backend-credentials;
+    # older versions kept it on runai-backend-tenants-manager.
+    RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-credentials -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    if [ -z "$RUNAI_ADMIN_PASSWORD" ]; then
+        RUNAI_ADMIN_PASSWORD=$(kubectl get secret runai-backend-tenants-manager -n runai-backend -o jsonpath='{.data.ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    fi
     if [ -z "$RUNAI_ADMIN_PASSWORD" ]; then
         print_error "Failed to get RUNAI_ADMIN_PASSWORD"
         exit 1
@@ -176,6 +181,19 @@ get_runai_credentials() {
         exit 1
     fi
     print_success "RUNAI_CTRL_PLANE_URL: $RUNAI_CTRL_PLANE_URL"
+
+    print_info "Getting KEYCLOAK_ADMIN_PASSWORD..."
+    # Run:AI 2.26+ stores it as admin-password in runai-backend-credentials;
+    # older versions kept KEYCLOAK_ADMIN_PASSWORD on runai-backend-keycloakx.
+    KEYCLOAK_ADMIN_PASSWORD=$(kubectl get secret runai-backend-credentials -n runai-backend -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d)
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+        KEYCLOAK_ADMIN_PASSWORD=$(kubectl get secret runai-backend-keycloakx -n runai-backend -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+    fi
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+        print_error "Failed to get KEYCLOAK_ADMIN_PASSWORD"
+        exit 1
+    fi
+    print_success "KEYCLOAK_ADMIN_PASSWORD: ********"
 }
 
 # Function to get IDP type
@@ -243,7 +261,8 @@ create_runai_secret() {
         --from-literal=RUNAI_ADMIN_USERNAME="$RUNAI_ADMIN_USERNAME" \
         --from-literal=RUNAI_ADMIN_PASSWORD="$RUNAI_ADMIN_PASSWORD" \
         --from-literal=RUNAI_CTRL_PLANE_URL="$RUNAI_CTRL_PLANE_URL" \
-        --from-literal=RUNAI_IDP_TYPE="$RUNAI_IDP_TYPE"
+        --from-literal=RUNAI_IDP_TYPE="$RUNAI_IDP_TYPE" \
+        --from-literal=KEYCLOAK_ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD"
     
     print_success "Secret created successfully"
 }

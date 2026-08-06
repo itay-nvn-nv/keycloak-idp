@@ -8,15 +8,23 @@ echo "======================================"
 # Step 1: Authenticate with Keycloak
 echo ""
 echo "[1/2] Authenticating with Keycloak..."
-KEYCLOAK_TOKEN=$(curl -s -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
+if [ -z "$KEYCLOAK_ADMIN" ] || [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ -z "$KC_HOSTNAME" ]; then
+  echo "ERROR: Missing Keycloak credentials (KC_HOSTNAME, KEYCLOAK_ADMIN, or KEYCLOAK_ADMIN_PASSWORD)"
+  exit 1
+fi
+
+TOKEN_RESPONSE=$(curl -s -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "username=$KEYCLOAK_ADMIN" \
   -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
   -d 'grant_type=password' \
-  -d 'client_id=admin-cli' | jq -r '.access_token')
+  -d 'client_id=admin-cli')
+
+KEYCLOAK_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
 
 if [ -z "$KEYCLOAK_TOKEN" ] || [ "$KEYCLOAK_TOKEN" = "null" ]; then
   echo "ERROR: Failed to obtain Keycloak token"
+  echo "$TOKEN_RESPONSE" | jq -c '{error, error_description}' 2>/dev/null || echo "$TOKEN_RESPONSE"
   exit 1
 fi
 

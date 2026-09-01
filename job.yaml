@@ -51,6 +51,8 @@ spec:
         envFrom:
           - secretRef:
               name: runai-ctrl-plane-data
+          - secretRef:
+              name: runai-backend-keycloakx
           - configMapRef:
               name: runai-backend-keycloakx
         command: ["/scripts/03-runai-setup.sh"]

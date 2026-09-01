@@ -122,7 +122,7 @@
       "protocol": "openid-connect",
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
-        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/oidc/endpoint"
+        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
       ],
       "webOrigins": ["RUNAI_CTRL_PLANE_URL_PLACEHOLDER/*"],
       "attributes": {
@@ -194,14 +194,14 @@
         "saml_name_id_format": "email",
         "saml.server.signature": true,
         "saml.signature.algorithm": "RSA_SHA256",
-        "saml_single_logout_service_url_post": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/saml/endpoint"
+        "saml_single_logout_service_url_post": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
       },
       "alwaysDisplayInConsole": false,
       "rootUrl": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER",
       "baseUrl": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER",
       "adminUrl": "",
       "redirectUris": [
-        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/saml/endpoint"
+        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
       ],
       "protocolMappers": [
         {

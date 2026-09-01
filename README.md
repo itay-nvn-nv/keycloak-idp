@@ -20,7 +20,7 @@ The automated setup script performs the following operations:
    
    The integration enables users to authenticate to Run:AI using their IDP credentials.
 
-3. **Sets up access control** - Creates a sample project (`dev-team`) and configures an access rule that grants the `developer-group` automatic permissions, demonstrating how SSO groups can be mapped to Run:AI project permissions.
+3. **Sets up access control** - Creates a sample project (`dev-team`) and configures an access rule that grants the `developer-group` the "AI practitioner" role automatically, demonstrating how SSO groups can be mapped to Run:AI project permissions.
 
 After setup, users can log into Run:AI using their IDP credentials (e.g., `jane.smith@acme.zzz` / `123456`) with group-based access control automatically enforced.
 
@@ -73,7 +73,27 @@ The setup uses a Kubernetes Job with 3 init containers that run sequentially:
 
 1. **url-health-check** - Verifies Keycloak and Run:AI control plane are accessible
 2. **keycloak-setup** - Authenticates with Keycloak and imports the realm configuration
-3. **runai-setup** - Creates the IDP, project, and access rules in Run:AI
+3. **runai-setup** - Creates the IDP, aligns the realm client with the IDP broker endpoint, then creates the project and access rules in Run:AI
+
+### IDP alias and the broker redirect URI
+
+The control plane assigns every IDP a randomly generated alias (for example `oidc-78bd78`) and brokers the login callback on an alias-specific path:
+
+```
+https://<control-plane>/auth/realms/runai/broker/oidc-78bd78/endpoint
+```
+
+Because the alias only exists once the IDP has been created, it cannot be baked into `realm.json`. The realm also has to be imported before the IDP can be created, since creating an OIDC IDP requires the realm client's secret and its OIDC discovery document. The `runai-setup` container therefore reconciles the two after the fact: it reads the alias back from `GET /api/v1/idps`, builds the alias-specific broker URI, and updates the `redirectUris` of the relevant realm client (plus the SAML single-logout URL when running in SAML mode).
+
+The `redirectUri` field returned by the control plane reports the generic `/broker/oidc/endpoint` path rather than the alias path, so the alias is what drives the final URI. This reconciliation is idempotent: re-runs skip the update when the client already points at the correct endpoint.
+
+`realm.json` marks the alias segment with `RUNAI_IDP_ALIAS_PLACEHOLDER`, which `keycloak-setup` leaves untouched on purpose:
+
+```
+RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint
+```
+
+If `runai-setup` fails, the job fails and the client is left with a visibly unresolved redirect URI rather than a plausible-looking but non-working one. The placeholder occupies only the alias segment so the value stays an absolute URL — Keycloak rejects redirect URIs that are not absolute when a client has no `rootUrl`, so a bare placeholder token would fail the realm import.
 
 All setup scripts are maintained as separate shell files in the `scripts/` directory and mounted into the job via ConfigMap. This provides:
 - Better maintainability with proper syntax highlighting

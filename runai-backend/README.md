@@ -1,10 +1,12 @@
-# keycloak-idp
+# Option 1: Run:AI bundled Keycloak
 
-Turnkey IDP for Run:AI
+Turnkey IDP for Run:AI, using the Keycloak instance that already runs in the `runai-backend` namespace.
+
+This is the original, in-cluster integration. It is unchanged aside from living in this folder and reading the shared `../realm.json`. For a standalone Keycloak on an empty cluster, see [`../standalone/`](../standalone/).
 
 ## Description
 
-This repository provides an automated setup for integrating Keycloak as an Identity Provider (IDP) with Run:AI. It connects to the existing Keycloak instance in the `runai-backend` namespace and configures it for SSO authentication.
+This option provides an automated setup for integrating Keycloak as an Identity Provider (IDP) with Run:AI. It connects to the existing Keycloak instance in the `runai-backend` namespace and configures it for SSO authentication.
 
 The automated setup script performs the following operations:
 
@@ -26,10 +28,12 @@ After setup, users can log into Run:AI using their IDP credentials (e.g., `jane.
 
 ## Setup
 
-To set up the Keycloak IDP, run the automated setup script:
+To set up the Keycloak IDP, run the automated setup script from this directory or the repo root:
 
 ```bash
 ./setup.sh
+# or from the repo root:
+./runai-backend/setup.sh
 ```
 
 The script will:
@@ -56,6 +60,8 @@ To remove all resources created by the setup and restore the environment to its 
 
 ```bash
 ./cleanup.sh
+# or from the repo root:
+./runai-backend/cleanup.sh
 ```
 
 The cleanup script will:
@@ -105,7 +111,7 @@ The job is **idempotent** - it can be run multiple times safely as it checks for
 
 ## Pre-configured Users and Groups
 
-The realm includes pre-configured users and groups defined in `realm.json`. You can modify these as needed before running the setup.
+The realm includes pre-configured users and groups defined in the shared [`../realm.json`](../realm.json). You can modify these as needed before running the setup.
 
 ### Users
 
@@ -130,7 +136,7 @@ The realm includes pre-configured users and groups defined in `realm.json`. You 
 - All users have verified email addresses and are enabled by default
 - User UIDs range from 3010-3050, Group GIDs range from 6010-6050 (individual), 6510-6530 (groups)
 - The `developer-group` gets automatic access to the "dev-team" project created by the post-install script
-- User and group configurations can be modified in the `realm.json` file as needed
+- User and group configurations can be modified in the shared `../realm.json` file as needed
 
 ## CLI v1 Support (Optional)
 

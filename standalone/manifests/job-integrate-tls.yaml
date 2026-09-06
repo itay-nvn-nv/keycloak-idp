@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-idp-integrate-runai
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: keycloak-idp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: url-health-check
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/01-url-health-check.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: keycloak-setup
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/02-keycloak-setup.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: keycloak-realm-data
+              mountPath: /keycloak-realm-data
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: patch-clients
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/02-patch-clients.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: runai-setup
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/03-runai-setup.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      containers:
+        - name: main-container
+          image: __JOB_IMAGE__
+          command: ["sh", "-c", "echo 'Run:AI integration complete!'"]
+      volumes:
+        - name: scripts
+          configMap:
+            name: keycloak-scripts
+            defaultMode: 0755
+        - name: shared-volume
+          emptyDir: {}
+        - name: keycloak-realm-data
+          configMap:
+            name: keycloak-realm-data
+        - name: tls
+          secret:
+            secretName: "__TLS_SECRET__"

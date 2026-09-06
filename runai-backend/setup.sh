@@ -2,6 +2,12 @@
 
 set -e
 
+# Resolve paths relative to this script so it can be invoked from the repo root
+# or from this directory. realm.json is shared at the repository root.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$SCRIPT_DIR"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -97,8 +103,8 @@ get_keycloak_url() {
 create_realm_configmap() {
     print_section "Creating Keycloak Realm ConfigMap"
     
-    if [ ! -f "realm.json" ]; then
-        print_error "realm.json file not found in current directory"
+    if [ ! -f "$REPO_ROOT/realm.json" ]; then
+        print_error "realm.json file not found at $REPO_ROOT/realm.json"
         exit 1
     fi
     
@@ -117,7 +123,7 @@ create_realm_configmap() {
     fi
     
     print_info "Creating configmap from realm.json..."
-    kubectl -n runai-backend create configmap keycloak-realm-data --from-file=realm.json
+    kubectl -n runai-backend create configmap keycloak-realm-data --from-file=realm.json="$REPO_ROOT/realm.json"
     print_success "ConfigMap created successfully"
 }
 

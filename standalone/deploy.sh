@@ -40,14 +40,6 @@ prompt_if_empty() {
     printf -v "$varname" '%s' "$reply"
 }
 
-generate_password() {
-    if command_exists openssl; then
-        openssl rand -hex 16
-    else
-        tr -dc 'a-f0-9' </dev/urandom | head -c 32
-    fi
-}
-
 create_namespace() {
     print_section "Namespace"
     if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
@@ -62,7 +54,6 @@ collect_settings() {
     print_section "Standalone Keycloak Settings"
 
     NAMESPACE="${KEYCLOAK_NAMESPACE:-$DEFAULT_NAMESPACE}"
-    GENERATED_ADMIN_PASSWORD=false
 
     prompt_if_empty KEYCLOAK_HOSTNAME "Keycloak hostname (e.g. keycloak.example.com): "
     KEYCLOAK_HOSTNAME="$(strip_host "$KEYCLOAK_HOSTNAME")"
@@ -72,10 +63,7 @@ collect_settings() {
     fi
 
     ADMIN_USER="${KEYCLOAK_ADMIN:-$DEFAULT_ADMIN_USER}"
-    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
-        KEYCLOAK_ADMIN_PASSWORD="$(generate_password)"
-        GENERATED_ADMIN_PASSWORD=true
-    fi
+    KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-$DEFAULT_ADMIN_PASSWORD}"
 
     EXPOSE_MODE="${EXPOSE_MODE:-ingress}"
     if [ -z "$INGRESS_CLASS" ] && [ "$EXPOSE_MODE" = "ingress" ]; then
@@ -195,17 +183,11 @@ ensure_tls_secret() {
 create_secrets() {
     print_section "Secrets"
 
-    if kubectl -n "$NAMESPACE" get secret keycloak-admin >/dev/null 2>&1; then
-        ADMIN_USER="$(get_secret_value keycloak-admin username)"
-        KEYCLOAK_ADMIN_PASSWORD="$(get_secret_value keycloak-admin password)"
-        GENERATED_ADMIN_PASSWORD=false
-        print_info "Reusing existing Keycloak admin secret"
-    else
-        kubectl -n "$NAMESPACE" create secret generic keycloak-admin \
-            --from-literal=username="$ADMIN_USER" \
-            --from-literal=password="$KEYCLOAK_ADMIN_PASSWORD"
-        print_success "Created Keycloak admin secret"
-    fi
+    kubectl -n "$NAMESPACE" create secret generic keycloak-admin \
+        --from-literal=username="$ADMIN_USER" \
+        --from-literal=password="$KEYCLOAK_ADMIN_PASSWORD" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    print_success "Applied Keycloak admin secret ($ADMIN_USER)"
 
     local runai_url="$PLACEHOLDER_RUNAI_CTRL_PLANE_URL"
     local runai_user="placeholder"
@@ -450,12 +432,7 @@ display_summary() {
     print_info "Admin console:    $PUBLIC_URL/admin/"
     print_info "Helm release:     $HELM_RELEASE (ns $NAMESPACE)"
     print_info "Admin user:       $ADMIN_USER"
-    if [ "${GENERATED_ADMIN_PASSWORD:-false}" = true ]; then
-        print_info "Admin password:   $KEYCLOAK_ADMIN_PASSWORD"
-        print_warning "Store this password; it will not be shown again"
-    else
-        print_info "Admin password:   (from KEYCLOAK_ADMIN_PASSWORD)"
-    fi
+    print_info "Admin password:   $KEYCLOAK_ADMIN_PASSWORD"
     echo ""
     print_info "Realm 'mock-idp' uses placeholder control-plane URLs:"
     echo "  $PLACEHOLDER_RUNAI_CTRL_PLANE_URL"

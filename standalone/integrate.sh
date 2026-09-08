@@ -91,15 +91,8 @@ get_runai_settings() {
         exit 1
     fi
 
-    prompt_if_empty RUNAI_ADMIN_USERNAME "Run:AI admin username: "
-    if [ -z "$RUNAI_ADMIN_PASSWORD" ]; then
-        if [ -t 0 ]; then
-            prompt_if_empty RUNAI_ADMIN_PASSWORD "Run:AI admin password: " "" true
-        else
-            print_error "RUNAI_ADMIN_PASSWORD is required in non-interactive mode"
-            exit 1
-        fi
-    fi
+    prompt_if_empty RUNAI_ADMIN_USERNAME "Run:AI admin username [${DEFAULT_RUNAI_ADMIN_USERNAME}]: " "$DEFAULT_RUNAI_ADMIN_USERNAME"
+    prompt_if_empty RUNAI_ADMIN_PASSWORD "Run:AI admin password [${DEFAULT_RUNAI_ADMIN_PASSWORD}]: " "$DEFAULT_RUNAI_ADMIN_PASSWORD" true
 
     if [ -n "$RUNAI_IDP_TYPE" ]; then
         if [ "$RUNAI_IDP_TYPE" != "OIDC" ] && [ "$RUNAI_IDP_TYPE" != "SAML" ]; then
@@ -160,7 +153,7 @@ create_integrate_configmaps() {
 
     # Health-check both sides, then reuse the bundled realm import / Run:AI scripts.
     kubectl -n "$NAMESPACE" create configmap keycloak-scripts \
-        --from-file=01-url-health-check.sh="$REPO_ROOT/runai-backend/scripts/01-url-health-check.sh" \
+        --from-file=01-url-health-check.sh="$SCRIPT_DIR/scripts/01-integrate-health-check.sh" \
         --from-file=02-keycloak-setup.sh="$REPO_ROOT/runai-backend/scripts/02-keycloak-setup.sh" \
         --from-file=02-patch-clients.sh="$SCRIPT_DIR/scripts/02-patch-clients.sh" \
         --from-file=03-runai-setup.sh="$REPO_ROOT/runai-backend/scripts/03-runai-setup.sh" \
@@ -168,6 +161,57 @@ create_integrate_configmaps() {
         --dry-run=client -o yaml | kubectl apply -f -
 
     print_success "ConfigMaps updated"
+}
+
+rewrite_script_paths() {
+    local src="$1"
+    local dest="$2"
+    local shared="$3"
+    local realmdir="$4"
+    sed -e "s|/shared-files|${shared}|g" -e "s|/keycloak-realm-data|${realmdir}|g" "$src" > "$dest"
+    chmod +x "$dest"
+}
+
+run_integrate_locally() {
+    print_section "Running Integration From This Machine"
+
+    print_info "Calling Keycloak and the Run:AI control plane from this machine."
+    print_info "A cluster job would fail here: pods in the Keycloak cluster time out reaching a remote control plane."
+    print_info "Set INTEGRATE_MODE=in-cluster to force the Kubernetes job anyway."
+    echo ""
+
+    local work shared realm scripts
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' RETURN
+    shared="$work/shared-files"
+    realm="$work/keycloak-realm-data"
+    scripts="$work/scripts"
+    mkdir -p "$shared" "$realm" "$scripts"
+    cp "$REPO_ROOT/realm.json" "$realm/realm.json"
+
+    rewrite_script_paths "$SCRIPT_DIR/scripts/01-integrate-health-check.sh" "$scripts/01-integrate-health-check.sh" "$shared" "$realm"
+    rewrite_script_paths "$REPO_ROOT/runai-backend/scripts/02-keycloak-setup.sh" "$scripts/02-keycloak-setup.sh" "$shared" "$realm"
+    rewrite_script_paths "$SCRIPT_DIR/scripts/02-patch-clients.sh" "$scripts/02-patch-clients.sh" "$shared" "$realm"
+    rewrite_script_paths "$REPO_ROOT/runai-backend/scripts/03-runai-setup.sh" "$scripts/03-runai-setup.sh" "$shared" "$realm"
+
+    export KC_HOSTNAME="$PUBLIC_URL"
+    export KEYCLOAK_ADMIN="$ADMIN_USER"
+    export KEYCLOAK_ADMIN_PASSWORD
+    export RUNAI_CTRL_PLANE_URL
+    export RUNAI_ADMIN_USERNAME
+    export RUNAI_ADMIN_PASSWORD
+    export RUNAI_IDP_TYPE
+    export CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-5}"
+    export MAX_ATTEMPTS="${MAX_ATTEMPTS:-4}"
+
+    print_info "1/4 Health-check Keycloak + Run:AI"
+    sh "$scripts/01-integrate-health-check.sh"
+    print_info "2/4 Keycloak realm / clients"
+    sh "$scripts/02-keycloak-setup.sh"
+    print_info "3/4 Patch live clients"
+    sh "$scripts/02-patch-clients.sh"
+    print_info "4/4 Run:AI IDP + project"
+    sh "$scripts/03-runai-setup.sh"
 }
 
 apply_integrate_job() {
@@ -209,9 +253,11 @@ display_summary() {
     echo ""
     print_info "The developer-group is granted the AI practitioner role on project 'dev-team'."
     echo ""
-    print_info "To verify:"
-    echo "  kubectl -n $NAMESPACE get job keycloak-idp-integrate-runai"
-    echo "  kubectl -n $NAMESPACE logs job/keycloak-idp-integrate-runai"
+    if [ "${INTEGRATE_MODE:-local}" = "in-cluster" ]; then
+        print_info "To verify:"
+        echo "  kubectl -n $NAMESPACE get job keycloak-idp-integrate-runai"
+        echo "  kubectl -n $NAMESPACE logs job/keycloak-idp-integrate-runai"
+    fi
     echo ""
 }
 
@@ -220,12 +266,21 @@ main() {
     print_info "Configures this Keycloak realm/clients and a remote Run:AI control plane"
     echo ""
 
-    check_prerequisites
+    INTEGRATE_MODE="${INTEGRATE_MODE:-local}"
+    if [ "$INTEGRATE_MODE" = "in-cluster" ]; then
+        check_prerequisites
+    else
+        check_prerequisites curl
+    fi
     verify_standalone_install
     get_runai_settings
     update_job_secret
-    create_integrate_configmaps
-    apply_integrate_job
+    if [ "$INTEGRATE_MODE" = "in-cluster" ]; then
+        create_integrate_configmaps
+        apply_integrate_job
+    else
+        run_integrate_locally
+    fi
     display_summary
 }
 

@@ -150,25 +150,41 @@ else
     echo "Entity ID: $ENTITY_ID"
     XML_METADATA_URL="$KC_HOSTNAME/realms/$REALM_NAME/protocol/saml/descriptor"
 
+    # Fetch metadata here and send it as a file. The control plane's
+    # metadataXmlUrl fetch is a server-side hop that 504s when Keycloak is
+    # on another cluster (or otherwise unreachable from the control plane).
+    echo "Fetching SAML metadata from $XML_METADATA_URL ..."
+    METADATA_XML=$(curl -sS "$XML_METADATA_URL")
+    if [ -z "$METADATA_XML" ] || ! echo "$METADATA_XML" | grep -q EntityDescriptor; then
+      echo "ERROR: Failed to fetch SAML metadata from Keycloak"
+      echo "$METADATA_XML" | head -c 500
+      echo
+      exit 1
+    fi
+    METADATA_B64=$(printf '%s' "$METADATA_XML" | base64 | tr -d '\n')
+    IDP_BODY=$(jq -n --arg b64 "$METADATA_B64" '{
+        mappers: {
+            uid: "UID",
+            gid: "GID",
+            groups: "GROUPS",
+            supplementaryGroups: "SUPPLEMENTARYGROUPS",
+            email: "email"
+        },
+        type: "saml",
+        samlData: {
+            metadataXmlUrl: "",
+            metadataXmlFile: $b64,
+            fileName: "idp-metadata.xml",
+            metadataXmlType: "file"
+        }
+    }')
+
     HTTP_CODE=$(curl -s -o /tmp/idp_response.json -w "%{http_code}" -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
     --header 'accept: application/json, text/plain, */*' \
     --header 'accept-language: en-US,en;q=0.9' \
     --header 'Content-Type: application/json' \
     --header "authorization: Bearer $RUNAI_TOKEN" \
-    --data-raw "{
-        \"mappers\": {
-            \"uid\": \"UID\",
-            \"gid\": \"GID\",
-            \"groups\": \"GROUPS\",
-            \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
-            \"email\": \"email\"},
-        \"type\": \"saml\",
-        \"samlData\": {
-            \"metadataXmlUrl\": \"$XML_METADATA_URL\",
-            \"metadataXmlFile\": \"\",
-            \"fileName\": \"\",
-            \"metadataXmlType\": \"url\"}
-    }")
+    --data "$IDP_BODY")
     
     if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
       echo "✓ SAML IDP created successfully"

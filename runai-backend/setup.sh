@@ -39,9 +39,54 @@ print_section() {
     echo -e "${BLUE}========================================${NC}"
 }
 
-# Function to check if command exists
+# errexit otherwise abandons the run without a word, which makes a dropped
+# connection look like the script simply stopped on its own.
+SETUP_COMPLETED=false
+report_incomplete_exit() {
+    local rc=$?
+    if [ $rc -ne 0 ] && [ "$SETUP_COMPLETED" != true ]; then
+        print_error "Setup did not complete (exit code $rc) - see the last message above"
+    fi
+}
+trap report_incomplete_exit EXIT
+
+RETRY_ATTEMPTS=5
+RETRY_DELAY=5
+
+is_transient_error() {
+    grep -qE 'TLS handshake timeout|Unable to connect to the server|connection refused|i/o timeout|unexpected EOF|connection reset' "$1"
+}
+
+# A busy API server intermittently drops connections mid-handshake. Wrapping
+# kubectl itself gives every call site the same retry behaviour; real errors
+# such as NotFound still come back on the first attempt.
+kubectl() {
+    local attempt=1
+    local rc=0
+    local errfile
+    errfile=$(mktemp)
+
+    while :; do
+        rc=0
+        command kubectl "$@" 2>"$errfile" || rc=$?
+
+        if [ $rc -eq 0 ] || [ $attempt -ge $RETRY_ATTEMPTS ] || ! is_transient_error "$errfile"; then
+            break
+        fi
+
+        print_warning "Kubernetes API unreachable, retrying in ${RETRY_DELAY}s (attempt $attempt/$RETRY_ATTEMPTS)" >&2
+        attempt=$((attempt + 1))
+        sleep "$RETRY_DELAY"
+    done
+
+    cat "$errfile" >&2
+    rm -f "$errfile"
+    return $rc
+}
+
+# type -P ignores the kubectl wrapper above and only matches a real binary
 command_exists() {
-    command -v "$1" >/dev/null 2>&1
+    type -P "$1" >/dev/null 2>&1
 }
 
 # Function to check if required commands are available
@@ -72,18 +117,28 @@ check_keycloak_pod() {
     print_section "Verifying Keycloak Instance"
     
     print_info "Checking if Keycloak pod is running..."
-    if kubectl -n runai-backend get pod keycloak-0 &>/dev/null; then
-        local pod_status=$(kubectl -n runai-backend get pod keycloak-0 -o jsonpath='{.status.phase}')
-        if [ "$pod_status" == "Running" ]; then
-            print_success "Keycloak pod is running"
+
+    local pod_status
+    local errfile
+    errfile=$(mktemp)
+
+    if ! pod_status=$(kubectl -n runai-backend get pod keycloak-0 -o jsonpath='{.status.phase}' 2>"$errfile"); then
+        if grep -qi 'not found' "$errfile"; then
+            print_error "Keycloak pod 'keycloak-0' not found in namespace runai-backend"
         else
-            print_error "Keycloak pod is not running (status: $pod_status)"
-            exit 1
+            print_error "Could not query the Kubernetes API: $(tr '\n' ' ' < "$errfile")"
         fi
-    else
-        print_error "Keycloak pod not found"
+        rm -f "$errfile"
         exit 1
     fi
+    rm -f "$errfile"
+
+    if [ "$pod_status" != "Running" ]; then
+        print_error "Keycloak pod is not running (status: ${pod_status:-unknown})"
+        exit 1
+    fi
+
+    print_success "Keycloak pod is running"
 }
 
 # Function to get keycloak URL
@@ -413,6 +468,63 @@ monitor_job() {
     fi
 }
 
+# realm.json puts jane.smith in developer-group and the job grants that group
+# access to dev-team, so a single login exercises the broker round trip, the
+# claim mappers and the access rule at once.
+VERIFY_USER="${RUNAI_VERIFY_USER:-jane.smith}"
+VERIFY_PASSWORD="${RUNAI_VERIFY_PASSWORD:-123456}"
+VERIFY_GROUP="${RUNAI_VERIFY_GROUP:-developer-group}"
+VERIFY_PROJECT="${RUNAI_VERIFY_PROJECT:-dev-team}"
+
+# Function to prove a user can actually log in through the IDP that was just
+# configured. The job only reports that each API call succeeded, which is not
+# the same thing as the broker round trip working.
+verify_sso() {
+    print_section "Verifying SSO Login"
+
+    if [ "${RUNAI_SKIP_SSO_VERIFY:-false}" = "true" ]; then
+        print_info "RUNAI_SKIP_SSO_VERIFY is set, skipping login verification"
+        return
+    fi
+
+    if ! command_exists python3; then
+        print_warning "python3 not found, skipping login verification"
+        return
+    fi
+
+    if [ ! -f "$SCRIPT_DIR/verify-sso.py" ]; then
+        print_warning "verify-sso.py not found, skipping login verification"
+        return
+    fi
+
+    print_info "Logging in as $VERIFY_USER through the $RUNAI_IDP_TYPE IDP..."
+
+    local rc=0
+    RUNAI_ADMIN_PASSWORD="$RUNAI_ADMIN_PASSWORD" python3 "$SCRIPT_DIR/verify-sso.py" \
+        --control-plane "$RUNAI_CTRL_PLANE_URL" \
+        --idp-type "$RUNAI_IDP_TYPE" \
+        --admin-user "$RUNAI_ADMIN_USERNAME" \
+        --user "$VERIFY_USER" \
+        --password "$VERIFY_PASSWORD" \
+        --expect-group "$VERIFY_GROUP" \
+        --expect-project "$VERIFY_PROJECT" || rc=$?
+
+    case $rc in
+        0)
+            print_success "End-to-end SSO login verified"
+            ;;
+        2)
+            # Nothing was disproven, the operator's machine just cannot reach it
+            print_warning "Could not reach the control plane from here, login not verified"
+            print_info "Re-run from a host that can reach $RUNAI_CTRL_PLANE_URL, or set RUNAI_SKIP_SSO_VERIFY=true"
+            ;;
+        *)
+            print_error "SSO login verification failed - the IDP is configured but users cannot log in"
+            exit 1
+            ;;
+    esac
+}
+
 # Function to display summary
 display_summary() {
     print_section "Setup Complete!"
@@ -454,7 +566,9 @@ main() {
     create_runai_secret
     apply_job
     monitor_job
+    verify_sso
     display_summary
+    SETUP_COMPLETED=true
 }
 
 # Run main function

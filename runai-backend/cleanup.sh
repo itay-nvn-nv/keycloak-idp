@@ -33,9 +33,78 @@ print_section() {
     echo -e "${BLUE}========================================${NC}"
 }
 
-# Function to check if command exists
+# errexit otherwise abandons the teardown halfway through without a word,
+# leaving resources behind with no indication that it happened.
+CLEANUP_COMPLETED=false
+report_incomplete_exit() {
+    local rc=$?
+    if [ $rc -ne 0 ] && [ "$CLEANUP_COMPLETED" != true ]; then
+        print_error "Cleanup did not complete (exit code $rc) - some resources may remain"
+    fi
+}
+trap report_incomplete_exit EXIT
+
+RETRY_ATTEMPTS=5
+RETRY_DELAY=5
+
+is_transient_error() {
+    grep -qE 'TLS handshake timeout|Unable to connect to the server|connection refused|i/o timeout|unexpected EOF|connection reset' "$1"
+}
+
+# A busy API server intermittently drops connections mid-handshake. Wrapping
+# kubectl itself gives every call site the same retry behaviour; real errors
+# such as NotFound still come back on the first attempt.
+kubectl() {
+    local attempt=1
+    local rc=0
+    local errfile
+    errfile=$(mktemp)
+
+    while :; do
+        rc=0
+        command kubectl "$@" 2>"$errfile" || rc=$?
+
+        if [ $rc -eq 0 ] || [ $attempt -ge $RETRY_ATTEMPTS ] || ! is_transient_error "$errfile"; then
+            break
+        fi
+
+        print_warning "Kubernetes API unreachable, retrying in ${RETRY_DELAY}s (attempt $attempt/$RETRY_ATTEMPTS)" >&2
+        attempt=$((attempt + 1))
+        sleep "$RETRY_DELAY"
+    done
+
+    cat "$errfile" >&2
+    rm -f "$errfile"
+    return $rc
+}
+
+# The control plane and Keycloak sit behind an ingress that occasionally stalls
+# past the per-request deadline, so retry rather than abandoning the teardown.
+api_curl() {
+    local attempt=1
+    local rc=0
+    local out=""
+
+    while :; do
+        rc=0
+        out=$(command curl -s --connect-timeout 10 --max-time 60 "$@") || rc=$?
+
+        if [ $rc -eq 0 ] || [ $attempt -ge $RETRY_ATTEMPTS ]; then
+            break
+        fi
+
+        print_warning "Request failed (curl exit $rc), retrying in ${RETRY_DELAY}s (attempt $attempt/$RETRY_ATTEMPTS)" >&2
+        attempt=$((attempt + 1))
+        sleep "$RETRY_DELAY"
+    done
+
+    printf '%s' "$out"
+    return $rc
+}
+
+# type -P ignores the kubectl wrapper above and only matches a real binary
 command_exists() {
-    command -v "$1" >/dev/null 2>&1
+    type -P "$1" >/dev/null 2>&1
 }
 
 # Function to check if required commands are available
@@ -169,14 +238,14 @@ delete_runai_resources() {
     
     # Authenticate with Run:AI
     print_info "Authenticating with Run:AI..."
-    TOKEN_RESPONSE=$(curl -s -f --connect-timeout 10 --max-time 30 -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
+    TOKEN_RESPONSE=$(api_curl -f -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
         --header 'accept: application/json, text/plain, */*' \
         --header 'Content-Type: application/json' \
         --data-raw "{
             \"grantType\": \"password\",
             \"clientID\": \"cli\",
             \"username\": \"$RUNAI_ADMIN_USERNAME\",
-            \"password\": \"$RUNAI_ADMIN_PASSWORD\"}" 2>&1) || {
+            \"password\": \"$RUNAI_ADMIN_PASSWORD\"}") || {
         print_error "Failed to connect to Run:AI API"
         print_warning "Skipping Run:AI resource cleanup"
         return
@@ -195,7 +264,7 @@ delete_runai_resources() {
     
     # Get project ID
     print_info "Looking for 'dev-team' project..."
-    EXISTING_PROJECTS=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
+    EXISTING_PROJECTS=$(api_curl "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
     # Handle both array and object responses
@@ -214,24 +283,19 @@ delete_runai_resources() {
     if [ -n "$PROJECT_ID" ] && [ "$PROJECT_ID" != "null" ]; then
         # Delete access rules for this project
         print_info "Deleting access rules for project 'dev-team'..."
-        EXISTING_RULES=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
+        EXISTING_RULES=$(api_curl "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
-        # Handle both array and object responses
-        if echo "$EXISTING_RULES" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\") | .id")
-        else
-            RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".rules[]? | select(.scopeId==\"$PROJECT_ID\") | .id")
-            
-            if [ -z "$RULE_IDS" ]; then
-                RULE_IDS=$(echo "$EXISTING_RULES" | jq -r ".data[]? | select(.scopeId==\"$PROJECT_ID\") | .id")
-            fi
-        fi
+        # The control plane returns the list under .accessRules; older builds
+        # used .rules, .data, or a bare array.
+        RULE_IDS=$(echo "$EXISTING_RULES" | jq -r --arg pid "$PROJECT_ID" '
+            (if type == "array" then . else (.accessRules // .rules // .data // []) end)
+            | .[] | select(.scopeId == $pid) | .id' 2>/dev/null || true)
         
         if [ -n "$RULE_IDS" ]; then
             while IFS= read -r rule_id; do
                 if [ -n "$rule_id" ] && [ "$rule_id" != "null" ]; then
-                    HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+                    HTTP_CODE=$(api_curl -o /dev/null -w "%{http_code}" -X DELETE \
                         "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules/$rule_id" \
                         -H "authorization: Bearer $RUNAI_TOKEN")
                     
@@ -248,7 +312,7 @@ delete_runai_resources() {
         
         # Delete project
         print_info "Deleting project 'dev-team'..."
-        HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+        HTTP_CODE=$(api_curl -o /dev/null -w "%{http_code}" -X DELETE \
             "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects/$PROJECT_ID" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
@@ -263,14 +327,14 @@ delete_runai_resources() {
     
     # Delete IDP
     print_info "Deleting IDP configuration..."
-    IDP_LIST=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
+    IDP_LIST=$(api_curl "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
         -H "authorization: Bearer $RUNAI_TOKEN")
     
     IDP_ALIAS=$(echo "$IDP_LIST" | jq -r '.[0].alias // empty' 2>/dev/null)
     
     if [ -n "$IDP_ALIAS" ] && [ "$IDP_ALIAS" != "null" ]; then
         print_info "Found IDP with alias: $IDP_ALIAS"
-        HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+        HTTP_CODE=$(api_curl -o /dev/null -w "%{http_code}" -X DELETE \
             "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$IDP_ALIAS" \
             -H "authorization: Bearer $RUNAI_TOKEN")
         
@@ -295,12 +359,12 @@ delete_keycloak_realm() {
     
     # Authenticate with Keycloak
     print_info "Authenticating with Keycloak..."
-    KC_RESPONSE=$(curl -s -f --connect-timeout 10 --max-time 30 -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
+    KC_RESPONSE=$(api_curl -f -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "username=$KEYCLOAK_ADMIN" \
         -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
         -d 'grant_type=password' \
-        -d 'client_id=admin-cli' 2>&1) || {
+        -d 'client_id=admin-cli') || {
         print_error "Failed to connect to Keycloak API"
         print_warning "Skipping Keycloak realm cleanup"
         return
@@ -319,7 +383,7 @@ delete_keycloak_realm() {
     
     # Delete realm
     print_info "Deleting realm 'mock-idp'..."
-    HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+    HTTP_CODE=$(api_curl -o /dev/null -w "%{http_code}" -X DELETE \
         "$KC_HOSTNAME/admin/realms/mock-idp" \
         -H "authorization: Bearer $KEYCLOAK_TOKEN")
     
@@ -420,6 +484,7 @@ main() {
     # Delete k8s resources last
     delete_kubernetes_resources
     display_summary
+    CLEANUP_COMPLETED=true
 }
 
 # Run main function

@@ -386,16 +386,12 @@ echo "Checking if access rule already exists..."
 EXISTING_RULES=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 
-# Handle both array and object responses
-if echo "$EXISTING_RULES" | jq -e 'type == "array"' >/dev/null 2>&1; then
-  RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".[] | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
-else
-  RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".rules[]? | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
-  
-  if [ -z "$RULE_EXISTS" ] || [ "$RULE_EXISTS" = "null" ]; then
-    RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r ".data[]? | select(.scopeId==\"$PROJECT_ID\" and .subjectId==\"developer-group\") | .id // empty")
-  fi
-fi
+# The control plane returns the list under .accessRules; older builds used
+# .rules, .data, or a bare array.
+RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r --arg pid "$PROJECT_ID" '
+  (if type == "array" then . else (.accessRules // .rules // .data // []) end)
+  | map(select(.scopeId == $pid and .subjectId == "developer-group"))
+  | (.[0].id // empty)' 2>/dev/null || true)
 
 if [ -n "$RULE_EXISTS" ] && [ "$RULE_EXISTS" != "null" ]; then
   echo "✓ Access rule for 'developer-group' already exists. Skipping."

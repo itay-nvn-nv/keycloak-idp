@@ -43,6 +43,7 @@ The script will:
 4. Prompt you to select the IDP type (OIDC or SAML)
 5. Create the required Secret
 6. Apply and monitor the post-install job
+7. Verify that a user can actually log in through the new IDP
 
 ### Non-interactive mode
 
@@ -52,6 +53,40 @@ You can also run the script non-interactively by setting the `RUNAI_IDP_TYPE` en
 RUNAI_IDP_TYPE=OIDC ./setup.sh
 # or
 RUNAI_IDP_TYPE=SAML ./setup.sh
+```
+
+### Login verification
+
+The post-install job only reports that each API call succeeded, which is not the
+same as the broker round trip working. As a last step `setup.sh` runs
+`verify-sso.py`, which performs the full authorization-code flow a browser would:
+request a code from the `runai` realm with `kc_idp_hint`, sign in against the
+`mock-idp` realm, follow the broker callback, exchange the code, and then confirm
+the token carries the expected group and that the granted project is visible.
+
+It needs `python3` and network access to the control plane from wherever you run
+`setup.sh`. If either is missing the step is skipped with a warning rather than
+failing the run. A genuine login failure does fail the run.
+
+```bash
+# skip it entirely
+RUNAI_SKIP_SSO_VERIFY=true ./setup.sh
+
+# verify as a different user (defaults shown)
+RUNAI_VERIFY_USER=jane.smith \
+RUNAI_VERIFY_PASSWORD=123456 \
+RUNAI_VERIFY_GROUP=developer-group \
+RUNAI_VERIFY_PROJECT=dev-team ./setup.sh
+```
+
+It can also be run on its own against an existing install:
+
+```bash
+RUNAI_ADMIN_PASSWORD=... ./verify-sso.py \
+  --control-plane https://my-cluster.example.com \
+  --idp-type SAML --admin-user test@run.ai \
+  --user jane.smith --password 123456 \
+  --expect-group developer-group --expect-project dev-team
 ```
 
 ## Cleanup

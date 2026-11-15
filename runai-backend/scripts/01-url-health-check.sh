@@ -2,7 +2,7 @@
 set -e
 
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-30}"
-echo "Starting URL health check with timeout of ${activeDeadlineSeconds} seconds..."
+echo "Starting URL health check, retrying every ${CHECK_INTERVAL_SECONDS}s until the job deadline..."
 
 while true; do
   echo "Checking Keycloak URL: $KC_HOSTNAME"

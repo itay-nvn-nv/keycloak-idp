@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: authentik-idp-seed
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: authentik-idp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: url-health-check
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          env:
+            - name: AK_HOSTNAME
+              value: "__INTERNAL_URL__"
+          command: ["/scripts/01-url-health-check.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+        - name: authentik-setup
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          env:
+            # Seeding talks to the in-cluster service so it works before DNS for
+            # the public hostname exists; AK_PUBLIC_URL still goes into the
+            # SAML issuer and the handoff file.
+            - name: AK_HOSTNAME
+              value: "__INTERNAL_URL__"
+          command: ["/scripts/02-authentik-setup.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: authentik-seed-data
+              mountPath: /authentik-seed
+              readOnly: true
+      containers:
+        - name: main-container
+          image: __JOB_IMAGE__
+          command: ["sh", "-c", "echo 'authentik seed complete!'"]
+      volumes:
+        - name: scripts
+          configMap:
+            name: authentik-scripts
+            defaultMode: 0755
+        - name: shared-volume
+          emptyDir: {}
+        - name: authentik-seed-data
+          configMap:
+            name: authentik-seed-data

@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: authentik-idp-integrate-runai
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: authentik-idp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: url-health-check
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/01-integrate-health-check.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: authentik-setup
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/02-authentik-setup.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: authentik-seed-data
+              mountPath: /authentik-seed
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: runai-setup
+          image: __JOB_IMAGE__
+          envFrom:
+            - secretRef:
+                name: runai-ctrl-plane-data
+          command: ["/scripts/with-tls-bundle.sh", "/scripts/03-runai-setup.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared-volume
+              mountPath: /shared-files
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      containers:
+        - name: main-container
+          image: __JOB_IMAGE__
+          command: ["sh", "-c", "echo 'Run:AI integration complete!'"]
+      volumes:
+        - name: scripts
+          configMap:
+            name: authentik-scripts
+            defaultMode: 0755
+        - name: shared-volume
+          emptyDir: {}
+        - name: authentik-seed-data
+          configMap:
+            name: authentik-seed-data
+        - name: tls
+          secret:
+            secretName: "__TLS_SECRET__"

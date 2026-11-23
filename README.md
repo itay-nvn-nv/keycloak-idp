@@ -1,13 +1,14 @@
 # keycloak-idp
 
-Turnkey IDP for Run:AI. Two install paths share one realm:
+Turnkey IDP for Run:AI. Three install paths share one set of users and groups:
 
 | Option | When to use | Entry point |
 |--|--|--|
 | **Run:AI bundled Keycloak** | Keycloak is already running in `runai-backend` on the same cluster as the control plane | [`runai-backend/setup.sh`](runai-backend/setup.sh) |
 | **Standalone Keycloak** | Empty cluster, or an IDP that must stay isolated and attach later to a remote control plane | [`standalone/deploy.sh`](standalone/deploy.sh) then optional [`standalone/integrate.sh`](standalone/integrate.sh) |
+| **Standalone authentik** | Same as above, but you want one admin UI for users, groups, providers, and claim mappings instead of Keycloak | [`authentik/deploy.sh`](authentik/deploy.sh) then optional [`authentik/integrate.sh`](authentik/integrate.sh) |
 
-[`realm.json`](realm.json) is shared. Do not duplicate it.
+[`realm.json`](realm.json) is shared. Do not duplicate it. The Keycloak paths import it as a realm; the authentik path reads its users and groups and creates the equivalent providers and property mappings.
 
 The bundled path is unchanged: it still talks to the in-cluster Keycloak in `runai-backend`, imports the realm, creates the Run:AI IDP, and sets up the sample project. It now lives in `runai-backend/` so it is not mixed with the standalone flow.
 
@@ -39,9 +40,23 @@ Details, env vars, TLS, and cleanup: [`standalone/README.md`](standalone/README.
 
 ---
 
+## Option 3 — Standalone authentik
+
+A Keycloak-free alternative with the same end result: an isolated IDP on the current cluster that exposes both an OIDC and a SAML provider over one user base, and attaches to a remote control plane later. Chosen when the Keycloak admin console is the thing you want to replace — authentik covers users, groups, providers, and claim mappings in one UI.
+
+```bash
+./authentik/deploy.sh
+# later, from a machine that can reach both authentik and Run:AI:
+./authentik/integrate.sh
+```
+
+Details, the Keycloak-to-authentik concept mapping, and caveats: [`authentik/README.md`](authentik/README.md).
+
+---
+
 ## Pre-configured Users and Groups
 
-Both options import the same `mock-idp` realm.
+All three options use the same users and groups.
 
 ### Users
 

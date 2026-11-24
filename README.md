@@ -1,4 +1,4 @@
-# keycloak-idp
+# runai-idp-lab
 
 Turnkey IDP for Run:AI. Three install paths share one set of users and groups:
 

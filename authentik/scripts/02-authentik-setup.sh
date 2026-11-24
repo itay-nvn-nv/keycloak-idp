@@ -21,6 +21,8 @@ RESP=/tmp/ak_resp.json
 AK_API="${AK_HOSTNAME%/}/api/v3"
 AK_PUBLIC_URL="${AK_PUBLIC_URL:-$AK_HOSTNAME}"
 AK_PUBLIC_URL="${AK_PUBLIC_URL%/}"
+AK_BASE_URL="${AK_BASE_URL:-}"
+AK_BASE_URL="${AK_BASE_URL%/}"
 OIDC_APP_SLUG="${OIDC_APP_SLUG:-runai-oidc}"
 SAML_APP_SLUG="${SAML_APP_SLUG:-runai-saml}"
 OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-lab-oidc-client}"
@@ -116,7 +118,7 @@ find_pk_by_name() {
 # ------------------------------------------------------------------ [1] token
 
 echo ""
-echo "[1/7] Verifying authentik API token..."
+echo "[1/8] Verifying authentik API token..."
 WHOAMI=$(api GET /core/users/me/ || true)
 AK_ADMIN=$(echo "$WHOAMI" | jq -r '.user.username // empty')
 if [ -z "$AK_ADMIN" ]; then
@@ -127,21 +129,57 @@ if [ -z "$AK_ADMIN" ]; then
 fi
 echo "Authenticated as '$AK_ADMIN'"
 
-# ------------------------------------------------------- [2] flows + signing
+# ----------------------------------------------------------- [2] base URL
 
 echo ""
-echo "[2/7] Resolving default flows and signing certificate..."
+echo "[2/8] Configuring the instance base URL..."
+
+# AUTHENTIK_WEB__BASE_URL only backfills an empty value at startup, so set it
+# here too: that covers instances deployed before the variable was added and
+# makes the value follow the hostname when it changes. Scheme and host only --
+# authentik appends the web path itself and rejects a URL that carries one.
+if [ -n "$AK_BASE_URL" ]; then
+  CURRENT_BASE_URL=$(api GET /admin/settings/ | jq -r '.base_url // ""')
+  if [ "$CURRENT_BASE_URL" = "$AK_BASE_URL" ]; then
+    echo "  = base URL already '$AK_BASE_URL'"
+  else
+    CODE=$(api_code PATCH /admin/settings/ "$(jq -n --arg u "$AK_BASE_URL" '{base_url: $u}')")
+    die_on_code "$CODE" "Failed to set the base URL"
+    echo "  + base URL set to '$AK_BASE_URL'"
+  fi
+else
+  echo "  ! AK_BASE_URL not provided; leaving the base URL unset"
+fi
+
+# ------------------------------------------------------- [3] flows + signing
+
+echo ""
+echo "[3/8] Resolving default flows and signing certificate..."
 
 flow_pk() {
   api_find /flows/instances/ slug "$1" | jq -r '.results[0].pk // empty'
 }
 
-AUTH_FLOW=$(flow_pk default-provider-authorization-implicit-consent)
+# The default flows and certificate come from blueprints that the worker applies
+# shortly after it reports ready, so on a fresh install they can lag the server's
+# health check by a minute or two.
+echo "Waiting for the default blueprints to be applied..."
+AUTH_FLOW=""
+waited=0
+while [ "$waited" -lt 300 ]; do
+  AUTH_FLOW=$(flow_pk default-provider-authorization-implicit-consent)
+  if [ -z "$AUTH_FLOW" ]; then
+    AUTH_FLOW=$(flow_pk default-provider-authorization-explicit-consent)
+  fi
+  if [ -n "$AUTH_FLOW" ]; then
+    break
+  fi
+  sleep 5
+  waited=$((waited + 5))
+done
 if [ -z "$AUTH_FLOW" ]; then
-  AUTH_FLOW=$(flow_pk default-provider-authorization-explicit-consent)
-fi
-if [ -z "$AUTH_FLOW" ]; then
-  echo "ERROR: No default provider authorization flow found"
+  echo "ERROR: No default provider authorization flow found after ${waited}s"
+  echo "Check the authentik worker logs for blueprint errors."
   exit 1
 fi
 
@@ -152,11 +190,16 @@ if [ -z "$INVALIDATION_FLOW" ]; then
   INVALIDATION_FLOW=$(flow_pk default-invalidation-flow)
 fi
 
-SIGNING_KP=$(api_find /crypto/certificatekeypairs/ name "authentik Self-signed Certificate" \
-  | jq -r '.results[0].pk // empty')
-if [ -z "$SIGNING_KP" ]; then
+SIGNING_KP=""
+waited=0
+while [ "$waited" -lt 120 ]; do
   SIGNING_KP=$(api GET "/crypto/certificatekeypairs/?has_key=true" | jq -r '.results[0].pk // empty')
-fi
+  if [ -n "$SIGNING_KP" ]; then
+    break
+  fi
+  sleep 5
+  waited=$((waited + 5))
+done
 if [ -z "$SIGNING_KP" ]; then
   echo "ERROR: No certificate keypair available to sign tokens/assertions"
   exit 1
@@ -169,7 +212,7 @@ echo "Signing keypair:    $SIGNING_KP"
 # ----------------------------------------------------------------- [3] groups
 
 echo ""
-echo "[3/7] Creating groups from $SEED ..."
+echo "[4/8] Creating groups from $SEED ..."
 
 : > /tmp/groups.map
 jq -r '.groups[]?.name' "$SEED" > /tmp/group_names
@@ -199,7 +242,7 @@ done < /tmp/group_names
 # ------------------------------------------------------------------ [4] users
 
 echo ""
-echo "[4/7] Creating users from $SEED ..."
+echo "[5/8] Creating users from $SEED ..."
 
 jq -r '.users[]?.username' "$SEED" > /tmp/user_names
 
@@ -256,7 +299,7 @@ done < /tmp/user_names
 # -------------------------------------------------------- [5] property maps
 
 echo ""
-echo "[5/7] Creating property mappings (Keycloak protocol mapper equivalents)..."
+echo "[6/8] Creating property mappings (Keycloak protocol mapper equivalents)..."
 
 # One scope mapping carries every claim Run:AI maps, so the control plane only
 # has to request a single extra scope on top of openid.
@@ -342,7 +385,7 @@ SAML_MAPPINGS=$(jq -n --arg a "$SAML_UID_PK" --arg b "$SAML_GID_PK" --arg c "$SA
 # -------------------------------------------------------------- [6] providers
 
 echo ""
-echo "[6/7] Creating OIDC and SAML providers..."
+echo "[7/8] Creating OIDC and SAML providers..."
 
 RUNAI_URL="${RUNAI_CTRL_PLANE_URL%/}"
 # RUNAI_IDP_ALIAS_PLACEHOLDER is intentionally left in place: the control plane
@@ -355,26 +398,65 @@ echo "Control plane:   $RUNAI_URL"
 echo "Broker endpoint: $BROKER_URI"
 echo "SAML entity id:  $SAML_SP_ENTITY_ID"
 
+# 03-runai-setup.sh swaps the placeholder for the alias the control plane
+# generates. A URI that already carries a real alias for this control plane is
+# therefore newer than anything this script can work out, and resetting it to
+# the placeholder would break a working integration on a re-run.
+has_resolved_alias() {
+  case "$1" in
+    "$RUNAI_URL/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint") return 1 ;;
+    "$RUNAI_URL/auth/realms/runai/broker/"*"/endpoint") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# grant_types defaults to an empty list on the model, and an empty list rejects
+# every grant with "invalid_request". The admin UI fills in a default, so this
+# only bites providers created through the API.
+OIDC_GRANT_TYPES='["authorization_code","refresh_token"]'
+
 OIDC_PROVIDER_PK=$(find_pk_by_name /providers/oauth2/ "Run:AI OIDC")
 if [ -n "$OIDC_PROVIDER_PK" ]; then
-  echo "  = OAuth2 provider 'Run:AI OIDC' exists; reconciling redirect URI"
-  patch=$(jq -n --arg u "$BROKER_URI" '{redirect_uris: [{matching_mode: "strict", url: $u}]}')
-  code=$(api_code PATCH "/providers/oauth2/$OIDC_PROVIDER_PK/" "$patch")
-  if ! ok_code "$code"; then
-    # Releases before 2024.8 stored redirect URIs as a newline-separated string.
-    patch=$(jq -n --arg u "$BROKER_URI" '{redirect_uris: $u}')
+  EXISTING=$(api GET "/providers/oauth2/$OIDC_PROVIDER_PK/")
+  CURRENT_URI=$(echo "$EXISTING" \
+    | jq -r 'if (.redirect_uris | type) == "array"
+             then (.redirect_uris[0].url // "")
+             else ((.redirect_uris // "") | split("\n")[0]) end')
+
+  patch='{}'
+  if has_resolved_alias "$CURRENT_URI"; then
+    echo "  = OAuth2 provider 'Run:AI OIDC' keeps its resolved redirect URI"
+  else
+    echo "  = OAuth2 provider 'Run:AI OIDC' exists; reconciling redirect URI"
+    patch=$(echo "$patch" | jq -c --arg u "$BROKER_URI" \
+      '.redirect_uris = [{matching_mode: "strict", url: $u}]')
+  fi
+  if [ "$(echo "$EXISTING" | jq -c '.grant_types // []')" = "[]" ]; then
+    echo "  + enabling grant types on 'Run:AI OIDC'"
+    patch=$(echo "$patch" | jq -c --argjson g "$OIDC_GRANT_TYPES" '.grant_types = $g')
+  fi
+
+  if [ "$patch" != "{}" ]; then
     code=$(api_code PATCH "/providers/oauth2/$OIDC_PROVIDER_PK/" "$patch")
-    die_on_code "$code" "Failed to update OAuth2 redirect URI"
+    if ! ok_code "$code"; then
+      # Releases before 2024.8 stored redirect URIs as a newline-separated string.
+      patch=$(echo "$patch" | jq -c --arg u "$BROKER_URI" \
+        'if has("redirect_uris") then .redirect_uris = $u else . end')
+      code=$(api_code PATCH "/providers/oauth2/$OIDC_PROVIDER_PK/" "$patch")
+      die_on_code "$code" "Failed to update OAuth2 provider"
+    fi
   fi
 else
   payload=$(jq -n \
     --arg af "$AUTH_FLOW" --arg inf "$INVALIDATION_FLOW" \
     --arg cid "$OIDC_CLIENT_ID" --arg uri "$BROKER_URI" --arg kp "$SIGNING_KP" \
     --argjson maps "$OIDC_MAPPINGS" \
+    --argjson grants "$OIDC_GRANT_TYPES" \
     '{name: "Run:AI OIDC",
       authorization_flow: $af,
       client_type: "confidential",
       client_id: $cid,
+      grant_types: $grants,
       redirect_uris: [{matching_mode: "strict", url: $uri}],
       property_mappings: $maps,
       signing_key: $kp,
@@ -394,9 +476,15 @@ fi
 
 SAML_PROVIDER_PK=$(find_pk_by_name /providers/saml/ "Run:AI SAML")
 if [ -n "$SAML_PROVIDER_PK" ]; then
-  echo "  = SAML provider 'Run:AI SAML' exists; reconciling ACS URL and audience"
-  patch=$(jq -n --arg acs "$BROKER_URI" --arg aud "$SAML_SP_ENTITY_ID" \
-    '{acs_url: $acs, audience: $aud}')
+  CURRENT_ACS=$(api GET "/providers/saml/$SAML_PROVIDER_PK/" | jq -r '.acs_url // ""')
+  if has_resolved_alias "$CURRENT_ACS"; then
+    echo "  = SAML provider 'Run:AI SAML' keeps its resolved ACS URL"
+    patch=$(jq -n --arg aud "$SAML_SP_ENTITY_ID" '{audience: $aud}')
+  else
+    echo "  = SAML provider 'Run:AI SAML' exists; reconciling ACS URL and audience"
+    patch=$(jq -n --arg acs "$BROKER_URI" --arg aud "$SAML_SP_ENTITY_ID" \
+      '{acs_url: $acs, audience: $aud}')
+  fi
   code=$(api_code PATCH "/providers/saml/$SAML_PROVIDER_PK/" "$patch")
   die_on_code "$code" "Failed to update SAML provider"
 else
@@ -429,7 +517,7 @@ fi
 # ----------------------------------------------------------- [7] applications
 
 echo ""
-echo "[7/7] Creating applications..."
+echo "[8/8] Creating applications..."
 
 ensure_application() {
   _slug="$1"; _name="$2"; _provider="$3"

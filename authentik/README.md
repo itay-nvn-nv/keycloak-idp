@@ -8,7 +8,7 @@ Pick this over `../standalone` when you want one admin UI for users, groups, pro
 
 ## What you get
 
-1. **`deploy.sh`** — Helm release `authentik` (server + worker + PostgreSQL + Ingress or LoadBalancer), a bootstrap admin with an API token, and the shared realm seeded with **placeholder** control-plane URLs.
+1. **`deploy.sh`** — Helm release `authentik` (server + worker + PostgreSQL, fronted by an Ingress, a Gateway API HTTPRoute, or a LoadBalancer), a bootstrap admin with an API token, and the shared realm seeded with **placeholder** control-plane URLs.
 2. **`integrate.sh`** *(optional)* — given a Run:AI control plane URL, reconcile the providers, create the IDP connector, sample project `dev-team`, and the developer-group access rule.
 
 Both an OIDC and a SAML provider are created, sitting side by side over the same user base. Only one is attached to Run:AI at a time; `RUNAI_IDP_TYPE` picks which.
@@ -27,7 +27,7 @@ Integrate replaces the host with the real URL, then `03-runai-setup.sh` fills in
 - `helm` 3
 - `jq`
 - `openssl` (only for the self-signed TLS option)
-- An Ingress controller (default) **or** a cloud LoadBalancer
+- An Ingress controller, a Gateway API gateway, **or** a cloud LoadBalancer (detected automatically; see [Exposure](#exposure))
 - A StorageClass for PostgreSQL (persistence is disabled if none exists)
 - Outbound access from that cluster to the Run:AI control plane **only when you run integrate**
 - The Run:AI control plane must be able to reach the authentik public URL (OIDC discovery / SAML metadata)
@@ -62,8 +62,11 @@ Useful environment variables:
 | `AUTHENTIK_TLS_SECRET_NAMESPACE` | Copy that secret from another namespace |
 | `AUTHENTIK_TLS_MODE` | `existing`, `selfsigned`, or `none` |
 | `AUTHENTIK_SKIP_TLS` | Set to skip TLS (HTTP) |
-| `EXPOSE_MODE` | `ingress` (default) or `loadbalancer` |
-| `INGRESS_CLASS` | IngressClass name |
+| `EXPOSE_MODE` | `ingress`, `gateway`, or `loadbalancer` (default: detected) |
+| `INGRESS_CLASS` | IngressClass name (default: detected) |
+| `GATEWAY_NAME` | Gateway to attach the HTTPRoute to (default: detected when unambiguous) |
+| `GATEWAY_NAMESPACE` | Namespace of that gateway |
+| `AUTHENTIK_URL_PATH` | Serve authentik under a path prefix instead of at the root |
 | `AUTHENTIK_STORAGE_CLASS` | PostgreSQL PVC class |
 | `AUTHENTIK_USE_EMPTYDIR` | Disable the PostgreSQL PVC |
 | `AUTHENTIK_CHART_REPO` | Chart repo (default `https://charts.goauthentik.io`) |
@@ -88,6 +91,33 @@ TLS:
 
 When it finishes, authentik is up with users, groups, mappings, and both providers, and **no** Run:AI connection. Admin console: `https://<hostname>/if/admin/` (`akadmin` / generated password).
 
+## Exposure
+
+How traffic reaches authentik is worked out from the cluster, so `EXPOSE_MODE` is usually unnecessary:
+
+| What the cluster has | What you get |
+|--|--|
+| An IngressClass and no gateway | `ingress` — the chart's Ingress |
+| A Gateway API gateway and no IngressClass | `gateway` — an HTTPRoute attached to that gateway |
+| Both | You are asked; non-interactive runs take `ingress` |
+| Neither | `loadbalancer` (HTTP only) |
+
+Setting `EXPOSE_MODE` explicitly always wins. The detection treats "a gateway and no IngressClass at all" as the gateway signal because a cluster can keep IngressClass-less leftover Ingress objects from a controller that no longer exists, and those would otherwise look like a working ingress.
+
+In gateway mode the gateway is found automatically when the cluster has exactly one; otherwise set `GATEWAY_NAME` and `GATEWAY_NAMESPACE`. The gateway terminates TLS with its own certificate, so no TLS secret is created. Deploy warns if no listener sets `allowedRoutes` to accept routes from other namespaces, since the HTTPRoute lives in the authentik namespace and would be rejected.
+
+### Sharing a hostname with the control plane
+
+If the only publicly trusted certificate belongs to the control-plane hostname, authentik can live under a path on it instead of getting its own subdomain:
+
+```bash
+AUTHENTIK_HOSTNAME=runai.example.com \
+AUTHENTIK_URL_PATH=/authentik \
+./authentik/deploy.sh
+```
+
+That sets `AUTHENTIK_WEB__PATH`, so authentik expects the prefix on **every** request including in-cluster health checks, and the HTTPRoute matches the prefix ahead of the control plane's catch-all `/` route. The instance base URL stays scheme-and-host only — authentik appends the path itself and rejects a base URL that carries one.
+
 ## 2) Optional: integrate a remote Run:AI control plane
 
 Run this against the **same kube context** as deploy (so the script can read the API token). Integration runs **on this machine** by default, because it must reach both the authentik URL and the Run:AI control plane. Kind / env-in-a-click clusters often cannot open TCP to a different Run:AI ELB.
@@ -105,6 +135,13 @@ RUNAI_IDP_TYPE=OIDC \
 ```
 
 Control-plane login defaults to `test@run.ai` / `Abcd!234` (override with `RUNAI_ADMIN_USERNAME` / `RUNAI_ADMIN_PASSWORD`). `RUNAI_IDP_TYPE` is `OIDC` or `SAML`.
+
+Run:AI serves one IDP at a time. Switching protocol means removing the current one first, otherwise integrate stops rather than wiring the provider to the other protocol's broker alias:
+
+```bash
+./authentik/cleanup.sh --integration-only
+RUNAI_IDP_TYPE=SAML ./authentik/integrate.sh
+```
 
 To run the in-cluster Job instead (only if that cluster can egress to the control plane):
 
@@ -156,11 +193,15 @@ Remove Run:AI objects only (authentik stays):
 ./authentik/cleanup.sh --integration-only
 ```
 
+That deletes every IDP registered on the control plane, the `dev-team` project, and its access rules, then resets the stored control-plane URL to the placeholder. Provider redirect URIs are left pointing at the old alias; the next integrate rewrites them.
+
 Destroy the Helm release and namespace (and Run:AI objects if integrated):
 
 ```bash
 ./authentik/cleanup.sh
 ```
+
+In gateway mode the HTTPRoute is deleted before the namespace, so the gateway stops advertising the hostname immediately instead of answering for a backend that is shutting down. Nothing is created outside the namespace apart from that route, so there is nothing else to collect.
 
 Type `yes` to confirm, or set `AUTHENTIK_FORCE=1`.
 
@@ -179,7 +220,7 @@ authentik/
   integrate.sh
   cleanup.sh
   lib.sh
-  manifests/          # seed / integrate Jobs
+  manifests/          # seed / integrate Jobs, HTTPRoute
   scripts/            # health checks, API seeding, Run:AI setup
 ```
 

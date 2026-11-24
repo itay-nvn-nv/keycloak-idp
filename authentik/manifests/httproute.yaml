@@ -1,0 +1,26 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: authentik-httproute
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: authentik-idp
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: __GATEWAY_NAME__
+      namespace: __GATEWAY_NAMESPACE__
+  hostnames:
+    - __HOSTNAME__
+  rules:
+    # No URLRewrite: authentik is configured with AUTHENTIK_WEB__PATH and
+    # expects to receive the prefix. Gateway API orders by path specificity,
+    # so this wins over a catch-all "/" route on the same hostname.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: __URL_PATH__
+      backendRefs:
+        - name: __SERVICE_NAME__
+          port: 80

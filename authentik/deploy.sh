@@ -50,6 +50,95 @@ create_namespace() {
     fi
 }
 
+# Picks between an Ingress and a Gateway API HTTPRoute. EXPOSE_MODE wins when
+# set; otherwise the cluster decides, and the user is asked only when the
+# cluster genuinely offers both.
+resolve_expose_mode() {
+    if [ -n "$EXPOSE_MODE" ]; then
+        print_info "Expose mode set explicitly: $EXPOSE_MODE"
+        return 0
+    fi
+
+    case "$(detect_expose_mode)" in
+        ingress)
+            EXPOSE_MODE="ingress"
+            print_success "Detected an IngressClass and no gateway; exposing authentik with an Ingress"
+            ;;
+        gateway)
+            EXPOSE_MODE="gateway"
+            print_success "Detected a Gateway API gateway and no IngressClass; exposing authentik with an HTTPRoute"
+            ;;
+        both)
+            print_info "This cluster has both an IngressClass and a Gateway API gateway:"
+            kubectl get ingressclass --no-headers 2>/dev/null | awk '{print "    ingress class: " $1}'
+            detect_gateways | sed 's/^/    gateway:       /'
+            if [ -t 0 ] && [ -z "$AUTHENTIK_FORCE" ]; then
+                echo ""
+                echo "  1) Ingress"
+                echo "  2) Gateway API HTTPRoute"
+                local choice
+                read -r -p "Choose 1 or 2 [1]: " choice
+                if [ "$choice" = "2" ]; then
+                    EXPOSE_MODE="gateway"
+                else
+                    EXPOSE_MODE="ingress"
+                fi
+            else
+                EXPOSE_MODE="ingress"
+                print_info "Defaulting to Ingress; set EXPOSE_MODE=gateway to use the gateway instead"
+            fi
+            ;;
+        *)
+            EXPOSE_MODE="ingress"
+            print_warning "Found neither an IngressClass nor a Gateway API gateway"
+            ;;
+    esac
+}
+
+resolve_gateway() {
+    if [ -z "$GATEWAY_NAME" ] || [ -z "$GATEWAY_NAMESPACE" ]; then
+        local found count
+        found="$(detect_gateways)"
+        count=$(printf '%s\n' "$found" | grep -c . || true)
+
+        if [ "$count" -eq 0 ]; then
+            print_error "No Gateway API gateway found on this cluster"
+            print_info "Set GATEWAY_NAME and GATEWAY_NAMESPACE, or use EXPOSE_MODE=ingress"
+            exit 1
+        elif [ "$count" -eq 1 ]; then
+            GATEWAY_NAMESPACE="${found%%/*}"
+            GATEWAY_NAME="${found##*/}"
+            print_info "Using the only gateway on the cluster: $GATEWAY_NAMESPACE/$GATEWAY_NAME"
+        elif [ -t 0 ] && [ -z "$AUTHENTIK_FORCE" ]; then
+            print_info "Multiple gateways found:"
+            printf '%s\n' "$found" | nl -w4 -s') '
+            local pick selected
+            read -r -p "Choose a gateway by number: " pick
+            selected=$(printf '%s\n' "$found" | sed -n "${pick}p")
+            if [ -z "$selected" ]; then
+                print_error "Invalid selection"
+                exit 1
+            fi
+            GATEWAY_NAMESPACE="${selected%%/*}"
+            GATEWAY_NAME="${selected##*/}"
+        else
+            print_error "Multiple gateways found; set GATEWAY_NAME and GATEWAY_NAMESPACE"
+            printf '%s\n' "$found" | sed 's/^/    /'
+            exit 1
+        fi
+    fi
+
+    if ! kubectl -n "$GATEWAY_NAMESPACE" get gateway "$GATEWAY_NAME" >/dev/null 2>&1; then
+        print_error "Gateway '$GATEWAY_NAME' not found in namespace '$GATEWAY_NAMESPACE'"
+        exit 1
+    fi
+
+    if ! gateway_allows_other_namespaces "$GATEWAY_NAMESPACE" "$GATEWAY_NAME"; then
+        print_warning "No listener on $GATEWAY_NAMESPACE/$GATEWAY_NAME accepts routes from other namespaces"
+        print_info "The HTTPRoute will likely be rejected; check the gateway's allowedRoutes"
+    fi
+}
+
 collect_settings() {
     print_section "Standalone authentik Settings"
 
@@ -64,7 +153,12 @@ collect_settings() {
 
     ADMIN_EMAIL="${AUTHENTIK_ADMIN_EMAIL:-$DEFAULT_ADMIN_EMAIL}"
 
-    EXPOSE_MODE="${EXPOSE_MODE:-ingress}"
+    resolve_expose_mode
+
+    if [ "$EXPOSE_MODE" = "gateway" ]; then
+        resolve_gateway
+    fi
+
     if [ -z "$INGRESS_CLASS" ] && [ "$EXPOSE_MODE" = "ingress" ]; then
         INGRESS_CLASS="$(detect_ingress_class || true)"
     fi
@@ -85,7 +179,11 @@ collect_settings() {
         fi
     fi
 
-    if [ -n "$AUTHENTIK_SKIP_TLS" ]; then
+    if [ "$EXPOSE_MODE" = "gateway" ]; then
+        # The gateway listener terminates TLS with its own certificate.
+        TLS_MODE="gateway"
+        TLS_SECRET_NAME=""
+    elif [ -n "$AUTHENTIK_SKIP_TLS" ]; then
         TLS_MODE="none"
     elif [ -n "$AUTHENTIK_TLS_SECRET" ]; then
         TLS_MODE="existing"
@@ -115,20 +213,42 @@ collect_settings() {
         prompt_if_empty AUTHENTIK_TLS_SECRET_NAMESPACE "Namespace of that secret [${NAMESPACE}]: " "$NAMESPACE"
     fi
 
+    local scheme="https"
     if [ "$TLS_MODE" = "none" ]; then
-        PUBLIC_URL="http://${AUTHENTIK_HOSTNAME}"
+        scheme="http"
         TLS_SECRET_NAME=""
-    else
-        PUBLIC_URL="https://${AUTHENTIK_HOSTNAME}"
-        if [ "$TLS_MODE" = "selfsigned" ]; then
-            TLS_SECRET_NAME="${AUTHENTIK_HOSTNAME}-tls"
-        else
-            TLS_SECRET_NAME="${TLS_SECRET_NAME:-authentik-tls}"
-        fi
+    elif [ "$TLS_MODE" = "selfsigned" ]; then
+        TLS_SECRET_NAME="${AUTHENTIK_HOSTNAME}-tls"
+    elif [ "$TLS_MODE" = "existing" ]; then
+        TLS_SECRET_NAME="${TLS_SECRET_NAME:-authentik-tls}"
     fi
 
+    # A URL path prefix lets authentik share a hostname with something else,
+    # which is the only option when the one trusted certificate belongs to that
+    # hostname. authentik is told about it via AUTHENTIK_WEB__PATH and then
+    # expects the prefix on every request, internal ones included.
+    URL_PATH_BASE="${AUTHENTIK_URL_PATH%/}"
+    case "$URL_PATH_BASE" in
+        ""|/) URL_PATH_BASE="" ;;
+        /*) ;;
+        *) URL_PATH_BASE="/$URL_PATH_BASE" ;;
+    esac
+    if [ -n "$URL_PATH_BASE" ]; then
+        URL_PATH="$URL_PATH_BASE"
+        WEB_PATH="${URL_PATH_BASE}/"
+    else
+        URL_PATH="/"
+        WEB_PATH="/"
+    fi
+
+    PUBLIC_URL="${scheme}://${AUTHENTIK_HOSTNAME}${URL_PATH_BASE}"
+
+    # authentik's own "base URL" setting is deliberately scheme + host only; it
+    # combines that with AUTHENTIK_WEB__PATH itself, so the prefix is left out.
+    BASE_URL="${scheme}://${AUTHENTIK_HOSTNAME}"
+
     # The chart names the server service <fullname>-server.
-    INTERNAL_URL="http://${HELM_RELEASE}-server.${NAMESPACE}.svc.cluster.local"
+    INTERNAL_URL="http://${HELM_RELEASE}-server.${NAMESPACE}.svc.cluster.local${URL_PATH_BASE}"
 
     if [ -n "$AUTHENTIK_USE_EMPTYDIR" ]; then
         USE_PVC=false
@@ -145,7 +265,11 @@ collect_settings() {
     print_info "Hostname:      $AUTHENTIK_HOSTNAME"
     print_info "Public URL:    $PUBLIC_URL"
     print_info "Internal URL:  $INTERNAL_URL"
-    print_info "Expose:        $EXPOSE_MODE ${INGRESS_CLASS:+(class $INGRESS_CLASS)}"
+    if [ "$EXPOSE_MODE" = "gateway" ]; then
+        print_info "Expose:        gateway ($GATEWAY_NAMESPACE/$GATEWAY_NAME, path $URL_PATH)"
+    else
+        print_info "Expose:        $EXPOSE_MODE ${INGRESS_CLASS:+(class $INGRESS_CLASS)}"
+    fi
     print_info "TLS:           $TLS_MODE ${TLS_SECRET_NAME:+($TLS_SECRET_NAME)}"
     print_info "Postgres:      bundled ($([ "$USE_PVC" = true ] && echo PVC || echo "no PVC"))"
     print_info "Admin user:    akadmin ($ADMIN_EMAIL)"
@@ -153,6 +277,12 @@ collect_settings() {
 
 ensure_tls_secret() {
     if [ "$TLS_MODE" = "none" ]; then
+        return 0
+    fi
+
+    if [ "$TLS_MODE" = "gateway" ]; then
+        print_section "TLS"
+        print_info "TLS is terminated by gateway '$GATEWAY_NAMESPACE/$GATEWAY_NAME'; no secret needed here"
         return 0
     fi
 
@@ -229,7 +359,11 @@ create_secrets() {
 
     # Consumed by the chart via authentik.existingSecret.secretName, which
     # mounts it with envFrom, so the keys are the full AUTHENTIK_* env names.
+    # That also means authentik.* Helm values are ignored, so AUTHENTIK_WEB__PATH
+    # has to be set here rather than through the chart.
     kubectl -n "$NAMESPACE" create secret generic authentik-admin \
+        --from-literal=AUTHENTIK_WEB__PATH="$WEB_PATH" \
+        --from-literal=AUTHENTIK_WEB__BASE_URL="$BASE_URL" \
         --from-literal=AUTHENTIK_SECRET_KEY="$SECRET_KEY" \
         --from-literal=AUTHENTIK_BOOTSTRAP_PASSWORD="$ADMIN_PASSWORD" \
         --from-literal=AUTHENTIK_BOOTSTRAP_TOKEN="$AK_TOKEN" \
@@ -266,6 +400,7 @@ create_secrets() {
         --from-literal=AK_TOKEN="$AK_TOKEN" \
         --from-literal=AK_HOSTNAME="$PUBLIC_URL" \
         --from-literal=AK_PUBLIC_URL="$PUBLIC_URL" \
+        --from-literal=AK_BASE_URL="$BASE_URL" \
         --from-literal=OIDC_APP_SLUG="$OIDC_APP_SLUG" \
         --from-literal=SAML_APP_SLUG="$SAML_APP_SLUG" \
         --from-literal=OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
@@ -288,6 +423,9 @@ create_configmaps() {
         --from-literal=AUTHENTIK_INTERNAL_URL="$INTERNAL_URL" \
         --from-literal=TLS_SECRET_NAME="${TLS_SECRET_NAME:-}" \
         --from-literal=EXPOSE_MODE="$EXPOSE_MODE" \
+        --from-literal=URL_PATH="$URL_PATH" \
+        --from-literal=GATEWAY_NAME="${GATEWAY_NAME:-}" \
+        --from-literal=GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-}" \
         --from-literal=HELM_RELEASE="$HELM_RELEASE" \
         --from-literal=PLACEHOLDER_RUNAI_CTRL_PLANE_URL="$PLACEHOLDER_RUNAI_CTRL_PLANE_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
@@ -319,11 +457,11 @@ write_helm_values() {
     local service_type="ClusterIP"
     local ingress_enabled="false"
 
-    if [ "$EXPOSE_MODE" = "loadbalancer" ]; then
-        service_type="LoadBalancer"
-    else
-        ingress_enabled="true"
-    fi
+    case "$EXPOSE_MODE" in
+        loadbalancer) service_type="LoadBalancer" ;;
+        gateway) ;;  # ClusterIP; an HTTPRoute fronts it
+        *) ingress_enabled="true" ;;
+    esac
 
     cat > "$dest" <<EOF
 global:
@@ -332,6 +470,8 @@ global:
 authentik:
   existingSecret:
     secretName: authentik-admin
+  web:
+    path: ${WEB_PATH}
 server:
   replicas: 1
   service:
@@ -396,21 +536,35 @@ helm_install_authentik() {
     values_file=$(mktemp)
     write_helm_values "$values_file"
 
-    print_info "Installing release '$HELM_RELEASE' from $AUTHENTIK_CHART_REPO"
-    if ! helm upgrade --install "$HELM_RELEASE" "$AUTHENTIK_CHART" \
+    # Download the chart before installing. Passing a bare chart name with --repo
+    # makes Helm resolve it as a local path first, which collides with this
+    # directory being named 'authentik'.
+    local chart_dir chart_tgz
+    chart_dir=$(mktemp -d)
+    print_info "Fetching chart $AUTHENTIK_CHART $AUTHENTIK_CHART_VERSION from $AUTHENTIK_CHART_REPO"
+    if ! helm pull "$AUTHENTIK_CHART" \
         --repo "$AUTHENTIK_CHART_REPO" \
-        --namespace "$NAMESPACE" \
         --version "$AUTHENTIK_CHART_VERSION" \
+        --destination "$chart_dir"; then
+        print_error "Failed to download the authentik Helm chart"
+        rm -rf "$chart_dir" "$values_file"
+        exit 1
+    fi
+    chart_tgz="$chart_dir/${AUTHENTIK_CHART}-${AUTHENTIK_CHART_VERSION}.tgz"
+
+    print_info "Installing release '$HELM_RELEASE'"
+    if ! helm upgrade --install "$HELM_RELEASE" "$chart_tgz" \
+        --namespace "$NAMESPACE" \
         --values "$values_file" \
         --wait \
         --timeout 15m; then
         print_error "Helm install failed"
         helm status "$HELM_RELEASE" -n "$NAMESPACE" || true
         kubectl -n "$NAMESPACE" get pods || true
-        rm -f "$values_file"
+        rm -rf "$chart_dir" "$values_file"
         exit 1
     fi
-    rm -f "$values_file"
+    rm -rf "$chart_dir" "$values_file"
 
     print_success "Helm release '$HELM_RELEASE' is installed"
     wait_for_authentik 300s || true
@@ -437,8 +591,39 @@ helm_install_authentik() {
             print_warning "LoadBalancer address is not ready yet. Check with:"
             print_info "kubectl -n $NAMESPACE get svc ${HELM_RELEASE}-server"
         fi
+    elif [ "$EXPOSE_MODE" = "gateway" ]; then
+        print_info "Exposure is handled by an HTTPRoute (applied next)"
     else
         print_success "Ingress is managed by the Helm chart for host $AUTHENTIK_HOSTNAME"
+    fi
+}
+
+expose_via_gateway() {
+    if [ "$EXPOSE_MODE" != "gateway" ]; then
+        return 0
+    fi
+
+    print_section "HTTPRoute"
+
+    apply_rendered "$SCRIPT_DIR/manifests/httproute.yaml"
+
+    local accepted=""
+    local waited=0
+    while [ $waited -lt 60 ]; do
+        accepted=$(kubectl -n "$NAMESPACE" get httproute authentik-httproute \
+            -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}' 2>/dev/null)
+        if [ -n "$accepted" ]; then
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+
+    if [ "$accepted" = "True" ]; then
+        print_success "HTTPRoute accepted by $GATEWAY_NAMESPACE/$GATEWAY_NAME"
+    else
+        print_warning "HTTPRoute not reported as Accepted yet. Check with:"
+        print_info "kubectl -n $NAMESPACE describe httproute authentik-httproute"
     fi
 }
 
@@ -461,7 +646,7 @@ display_summary() {
     echo ""
     print_success "authentik is deployed and seeded from the shared realm.json."
     echo ""
-    print_info "authentik URL:    $PUBLIC_URL"
+    print_info "authentik URL:    $PUBLIC_URL/"
     print_info "Admin console:    $PUBLIC_URL/if/admin/"
     print_info "Helm release:     $HELM_RELEASE (ns $NAMESPACE)"
     print_info "Admin user:       akadmin"
@@ -497,6 +682,7 @@ main() {
     create_secrets
     create_configmaps
     helm_install_authentik
+    expose_via_gateway
     seed_authentik
     display_summary
 }

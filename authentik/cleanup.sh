@@ -34,6 +34,9 @@ confirm_cleanup() {
         echo ""
         echo "  Kubernetes:"
         echo "    - Namespace: $NAMESPACE (Helm release '$HELM_RELEASE', jobs, secrets)"
+        if [ "$EXPOSE_MODE" = "gateway" ]; then
+            echo "    - HTTPRoute 'authentik-httproute'${GATEWAY_NAME:+ on gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME}"
+        fi
         echo ""
         echo "  Run:AI (if this instance was integrated):"
         echo "    - Access rules for 'developer-group'"
@@ -188,20 +191,25 @@ delete_runai_resources() {
     fi
 
     print_info "Deleting IDP configuration..."
-    local idp_list idp_alias http_code
+    local idp_list idp_aliases http_code
     idp_list=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
         -H "authorization: Bearer $runai_token")
-    idp_alias=$(echo "$idp_list" | jq -r '.[0].alias // empty' 2>/dev/null)
+    # Run:AI only serves one IDP at a time, but delete every one that is
+    # registered so switching between OIDC and SAML starts from a clean slate.
+    idp_aliases=$(echo "$idp_list" | jq -r '.[]?.alias // empty' 2>/dev/null)
 
-    if [ -n "$idp_alias" ] && [ "$idp_alias" != "null" ]; then
-        http_code=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
-            "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$idp_alias" \
-            -H "authorization: Bearer $runai_token")
-        if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
-            print_success "Deleted IDP '$idp_alias'"
-        else
-            print_warning "Failed to delete IDP (HTTP $http_code)"
-        fi
+    if [ -n "$idp_aliases" ]; then
+        while IFS= read -r idp_alias; do
+            [ -n "$idp_alias" ] || continue
+            http_code=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+                "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$idp_alias" \
+                -H "authorization: Bearer $runai_token")
+            if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+                print_success "Deleted IDP '$idp_alias'"
+            else
+                print_warning "Failed to delete IDP '$idp_alias' (HTTP $http_code)"
+            fi
+        done <<< "$idp_aliases"
     else
         print_info "No IDP found"
     fi
@@ -235,7 +243,26 @@ reset_integration_secret() {
     print_success "Run:AI fields restored to placeholders"
 }
 
+# The HTTPRoute is namespaced and would go with the namespace anyway, but
+# detaching it first makes the gateway stop advertising the hostname straight
+# away rather than answering for a backend that is being torn down.
+delete_exposure() {
+    if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if kubectl -n "$NAMESPACE" get httproute authentik-httproute >/dev/null 2>&1; then
+        print_section "Detaching from Gateway"
+        print_info "Deleting HTTPRoute 'authentik-httproute'${GATEWAY_NAME:+ from gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME}"
+        kubectl -n "$NAMESPACE" delete httproute authentik-httproute \
+            --ignore-not-found --timeout=60s || true
+        print_success "HTTPRoute removed"
+    fi
+}
+
 delete_namespace() {
+    delete_exposure
+
     print_section "Deleting Namespace '$NAMESPACE'"
     if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
         print_info "Namespace already gone"

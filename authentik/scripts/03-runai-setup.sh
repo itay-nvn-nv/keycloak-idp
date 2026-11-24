@@ -94,6 +94,15 @@ EXISTING_IDPS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
 IDP_EXISTS=$(echo "$EXISTING_IDPS" | jq -r 'length')
 
 if [ "$IDP_EXISTS" != "0" ] && [ "$IDP_EXISTS" != "null" ]; then
+  # Run:AI serves one IDP at a time. Reusing an IDP of the other protocol would
+  # silently wire this provider to the wrong broker alias, so stop instead.
+  EXISTING_TYPE=$(echo "$EXISTING_IDPS" | jq -r '[.[]?.type] | join(",")')
+  if ! echo "$EXISTING_IDPS" | jq -e --arg t "$IDP_TYPE_LOWER" 'any(.[]?; .type == $t)' >/dev/null; then
+    echo "ERROR: the control plane already has a '$EXISTING_TYPE' IDP, but '$IDP_TYPE_LOWER' was requested"
+    echo "Run:AI allows one IDP at a time. Remove the existing one first:"
+    echo "  ./authentik/cleanup.sh --integration-only"
+    exit 1
+  fi
   echo "✓ IDP already exists. Skipping IDP creation."
   IDP_OBJECT=$(echo "$EXISTING_IDPS" | select_idp)
 else
@@ -147,13 +156,20 @@ else
     # on another cluster.
     XML_METADATA_URL="$AK_PUBLIC_URL/application/saml/$SAML_APP_SLUG/metadata/"
     echo "Fetching SAML metadata from $XML_METADATA_URL ..."
-    METADATA_XML=$(curl -sS "$XML_METADATA_URL" || true)
+    # That URL 302-redirects to the API download endpoint, so follow redirects
+    # rather than reading the empty body of the redirect itself.
+    METADATA_XML=$(curl -sSL "$XML_METADATA_URL" || true)
 
     if ! echo "$METADATA_XML" | grep -q EntityDescriptor; then
       echo "Public metadata URL did not return a descriptor; trying the API endpoint..."
-      METADATA_XML=$(curl -sS "$AK_PUBLIC_URL/api/v3/providers/saml/$SAML_PROVIDER_PK/metadata/?download=false" \
-        -H "Authorization: Bearer $AK_TOKEN" -H 'Accept: application/json' \
-        | jq -r '.metadata // empty')
+      # Depending on the release this answers with raw XML or with the XML
+      # wrapped in a JSON object, so accept either.
+      METADATA_RAW=$(curl -sSL "$AK_PUBLIC_URL/api/v3/providers/saml/$SAML_PROVIDER_PK/metadata/" \
+        -H "Authorization: Bearer $AK_TOKEN" || true)
+      METADATA_XML=$(printf '%s' "$METADATA_RAW" | jq -r '.metadata // empty' 2>/dev/null || true)
+      if [ -z "$METADATA_XML" ]; then
+        METADATA_XML="$METADATA_RAW"
+      fi
     fi
 
     if [ -z "$METADATA_XML" ] || ! echo "$METADATA_XML" | grep -q EntityDescriptor; then

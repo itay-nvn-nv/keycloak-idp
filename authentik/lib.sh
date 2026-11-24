@@ -26,6 +26,13 @@ SAML_APP_SLUG="${SAML_APP_SLUG:-runai-saml}"
 OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-lab-oidc-client}"
 RUNAI_SCOPE_NAME="${RUNAI_SCOPE_NAME:-runai}"
 
+# EXPOSE_MODE=gateway attaches an HTTPRoute to an existing Gateway API gateway
+# instead of creating an Ingress. Needed where the only trusted certificate is
+# on the control-plane hostname, so authentik has to live under a path on it.
+GATEWAY_NAME="${GATEWAY_NAME:-}"
+GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-}"
+AUTHENTIK_URL_PATH="${AUTHENTIK_URL_PATH:-}"
+
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -89,6 +96,10 @@ render() {
         -e "s|__INTERNAL_URL__|${INTERNAL_URL}|g" \
         -e "s|__JOB_IMAGE__|${JOB_IMAGE}|g" \
         -e "s|__TLS_SECRET__|${TLS_SECRET_NAME}|g" \
+        -e "s|__URL_PATH__|${URL_PATH:-/}|g" \
+        -e "s|__SERVICE_NAME__|${HELM_RELEASE}-server|g" \
+        -e "s|__GATEWAY_NAME__|${GATEWAY_NAME}|g" \
+        -e "s|__GATEWAY_NAMESPACE__|${GATEWAY_NAMESPACE}|g" \
         "$src"
 }
 
@@ -125,11 +136,7 @@ get_configmap_value() {
 
 random_secret() {
     local bytes="${1:-32}"
-    if command_exists openssl; then
-        openssl rand -hex "$bytes"
-    else
-        head -c "$((bytes * 2))" /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c "1-$((bytes * 2))"
-    fi
+    head -c "$((bytes * 2))" /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c "1-$((bytes * 2))"
 }
 
 wait_for_authentik() {
@@ -269,6 +276,41 @@ strip_host() {
     echo "$raw"
 }
 
+detect_gateways() {
+    kubectl get gateways.gateway.networking.k8s.io -A -o json 2>/dev/null \
+        | jq -r '.items[]? | "\(.metadata.namespace)/\(.metadata.name)"'
+}
+
+# An HTTPRoute lives in the authentik namespace, so the gateway only accepts it
+# when a listener opts in to routes from elsewhere.
+gateway_allows_other_namespaces() {
+    kubectl -n "$1" get gateway "$2" -o json 2>/dev/null \
+        | jq -e '[.spec.listeners[]?
+                  | (.allowedRoutes.namespaces.from // "Same")
+                  | select(. == "All" or . == "Selector")]
+                 | length > 0' >/dev/null 2>&1
+}
+
+# Works out how traffic reaches this cluster. Prints ingress, gateway, both or
+# none. An IngressClass with no controller behind it would read as a working
+# ingress, so a cluster that has a gateway and no class at all is the clearest
+# signal that Gateway API is the real entry point.
+detect_expose_mode() {
+    local classes gateways
+    classes=$(kubectl get ingressclass -o name 2>/dev/null | grep -c . || true)
+    gateways=$(detect_gateways | grep -c . || true)
+
+    if [ "$classes" -gt 0 ] && [ "$gateways" -gt 0 ]; then
+        echo "both"
+    elif [ "$gateways" -gt 0 ]; then
+        echo "gateway"
+    elif [ "$classes" -gt 0 ]; then
+        echo "ingress"
+    else
+        echo "none"
+    fi
+}
+
 has_default_storage_class() {
     kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -q .
 }
@@ -307,5 +349,9 @@ load_standalone_config() {
         TLS_SECRET_NAME="${AUTHENTIK_TLS_SECRET:-$(get_configmap_value authentik-idp-config TLS_SECRET_NAME)}"
         HELM_RELEASE="${AUTHENTIK_HELM_RELEASE:-$(get_configmap_value authentik-idp-config HELM_RELEASE)}"
         HELM_RELEASE="${HELM_RELEASE:-authentik}"
+        EXPOSE_MODE="${EXPOSE_MODE:-$(get_configmap_value authentik-idp-config EXPOSE_MODE)}"
+        URL_PATH="${URL_PATH:-$(get_configmap_value authentik-idp-config URL_PATH)}"
+        GATEWAY_NAME="${GATEWAY_NAME:-$(get_configmap_value authentik-idp-config GATEWAY_NAME)}"
+        GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-$(get_configmap_value authentik-idp-config GATEWAY_NAMESPACE)}"
     fi
 }

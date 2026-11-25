@@ -5,10 +5,9 @@ echo "======================================"
 echo "RUN:AI SETUP (authentik)"
 echo "======================================"
 
-# Same contract as ../../runai-backend/scripts/03-runai-setup.sh, but the IDP
-# side talks to authentik's /api/v3 instead of Keycloak's /admin/realms. The
-# Run:AI calls (IDP, alias resolution, project, access rule) are intentionally
-# kept identical so both paths behave the same from the control plane's side.
+# Registers authentik with the control plane: create the IDP connector, resolve
+# the alias Run:AI generates for it, rewrite the provider to match, then create
+# the sample project and access rule.
 
 SHARED="${SHARED_DIR:-/shared-files}"
 OBJECTS="$SHARED/authentik_objects.json"
@@ -100,7 +99,7 @@ if [ "$IDP_EXISTS" != "0" ] && [ "$IDP_EXISTS" != "null" ]; then
   if ! echo "$EXISTING_IDPS" | jq -e --arg t "$IDP_TYPE_LOWER" 'any(.[]?; .type == $t)' >/dev/null; then
     echo "ERROR: the control plane already has a '$EXISTING_TYPE' IDP, but '$IDP_TYPE_LOWER' was requested"
     echo "Run:AI allows one IDP at a time. Remove the existing one first:"
-    echo "  ./authentik/cleanup.sh --integration-only"
+    echo "  ./cleanup.sh --integration-only"
     exit 1
   fi
   echo "✓ IDP already exists. Skipping IDP creation."

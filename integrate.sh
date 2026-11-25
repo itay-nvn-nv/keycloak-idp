@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
@@ -46,17 +46,17 @@ verify_standalone_install() {
     load_standalone_config
 
     if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-        print_error "Namespace '$NAMESPACE' not found. Run ./authentik/deploy.sh first."
+        print_error "Namespace '$NAMESPACE' not found. Run ./deploy.sh first."
         exit 1
     fi
 
     if ! authentik_is_installed; then
-        print_error "authentik Helm release was not found in '$NAMESPACE'. Run ./authentik/deploy.sh first."
+        print_error "authentik Helm release was not found in '$NAMESPACE'. Run ./deploy.sh first."
         exit 1
     fi
 
     if ! resource_exists secret runai-ctrl-plane-data || ! resource_exists secret authentik-admin; then
-        print_error "Standalone authentik secrets are missing. Run ./authentik/deploy.sh first."
+        print_error "Standalone authentik secrets are missing. Run ./deploy.sh first."
         exit 1
     fi
 
@@ -148,13 +148,13 @@ update_job_secret() {
 create_integrate_configmaps() {
     print_section "Refreshing ConfigMaps"
 
-    if [ ! -f "$REPO_ROOT/realm.json" ]; then
-        print_error "Shared realm.json not found at $REPO_ROOT/realm.json"
+    if [ ! -f "$SCRIPT_DIR/realm.json" ]; then
+        print_error "Shared realm.json not found at $SCRIPT_DIR/realm.json"
         exit 1
     fi
 
     kubectl -n "$NAMESPACE" create configmap authentik-seed-data \
-        --from-file=realm.json="$REPO_ROOT/realm.json" \
+        --from-file=realm.json="$SCRIPT_DIR/realm.json" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     kubectl -n "$NAMESPACE" create configmap authentik-scripts \
@@ -182,7 +182,7 @@ run_integrate_locally() {
     shared="$work/shared-files"
     seed="$work/authentik-seed"
     mkdir -p "$shared" "$seed"
-    cp "$REPO_ROOT/realm.json" "$seed/realm.json"
+    cp "$SCRIPT_DIR/realm.json" "$seed/realm.json"
 
     export SHARED_DIR="$shared"
     export SEED_FILE="$seed/realm.json"

@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
@@ -430,15 +430,15 @@ create_configmaps() {
         --from-literal=PLACEHOLDER_RUNAI_CTRL_PLANE_URL="$PLACEHOLDER_RUNAI_CTRL_PLANE_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
 
-    if [ ! -f "$REPO_ROOT/realm.json" ]; then
-        print_error "Shared realm.json not found at $REPO_ROOT/realm.json"
+    if [ ! -f "$SCRIPT_DIR/realm.json" ]; then
+        print_error "Shared realm.json not found at $SCRIPT_DIR/realm.json"
         exit 1
     fi
 
-    # Users and groups come from the same realm.json both Keycloak paths use;
-    # only the client/provider plumbing is authentik-specific.
+    # realm.json carries the users and groups only; the providers and claim
+    # mappings are built by the seed script against authentik's own API.
     kubectl -n "$NAMESPACE" create configmap authentik-seed-data \
-        --from-file=realm.json="$REPO_ROOT/realm.json" \
+        --from-file=realm.json="$SCRIPT_DIR/realm.json" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     kubectl -n "$NAMESPACE" create configmap authentik-scripts \
@@ -665,7 +665,7 @@ display_summary() {
     echo ""
     print_info "This instance is independent of any Run:AI control plane."
     print_info "When you have a control plane URL, attach it with:"
-    echo "  ./authentik/integrate.sh"
+    echo "  ./integrate.sh"
     echo ""
 }
 

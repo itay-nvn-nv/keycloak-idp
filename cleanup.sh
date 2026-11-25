@@ -13,8 +13,8 @@ usage() {
     echo "Usage: $0 [--integration-only | --all]"
     echo ""
     echo "  --integration-only  Remove the Run:AI IDP, project, and access rules."
-    echo "                      Keeps the standalone Keycloak instance."
-    echo "  --all               Delete the Keycloak namespace (default)."
+    echo "                      Keeps the standalone authentik instance."
+    echo "  --all               Delete the authentik namespace (default)."
 }
 
 confirm_cleanup() {
@@ -28,12 +28,15 @@ confirm_cleanup() {
         echo "    - Project: dev-team"
         echo "    - IDP configuration"
         echo ""
-        echo "  Keycloak stays running. Client redirect URIs are left as-is."
+        echo "  authentik stays running. Provider redirect URIs are left as-is."
     else
-        print_warning "This will DELETE the standalone Keycloak install:"
+        print_warning "This will DELETE the standalone authentik install:"
         echo ""
         echo "  Kubernetes:"
         echo "    - Namespace: $NAMESPACE (Helm release '$HELM_RELEASE', jobs, secrets)"
+        if [ "$EXPOSE_MODE" = "gateway" ]; then
+            echo "    - HTTPRoute 'authentik-httproute'${GATEWAY_NAME:+ on gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME}"
+        fi
         echo ""
         echo "  Run:AI (if this instance was integrated):"
         echo "    - Access rules for 'developer-group'"
@@ -44,8 +47,8 @@ confirm_cleanup() {
     fi
     echo ""
 
-    if [ -n "$KEYCLOAK_FORCE" ]; then
-        print_info "KEYCLOAK_FORCE is set; skipping prompt"
+    if [ -n "$AUTHENTIK_FORCE" ]; then
+        print_info "AUTHENTIK_FORCE is set; skipping prompt"
         return 0
     fi
 
@@ -148,7 +151,10 @@ delete_runai_resources() {
         if echo "$existing_rules" | jq -e 'type == "array"' >/dev/null 2>&1; then
             rule_ids=$(echo "$existing_rules" | jq -r ".[] | select(.scopeId==\"$project_id\") | .id")
         else
-            rule_ids=$(echo "$existing_rules" | jq -r ".rules[]? | select(.scopeId==\"$project_id\") | .id")
+            rule_ids=$(echo "$existing_rules" | jq -r ".accessRules[]? | select(.scopeId==\"$project_id\") | .id")
+            if [ -z "$rule_ids" ]; then
+                rule_ids=$(echo "$existing_rules" | jq -r ".rules[]? | select(.scopeId==\"$project_id\") | .id")
+            fi
             if [ -z "$rule_ids" ]; then
                 rule_ids=$(echo "$existing_rules" | jq -r ".data[]? | select(.scopeId==\"$project_id\") | .id")
             fi
@@ -185,20 +191,25 @@ delete_runai_resources() {
     fi
 
     print_info "Deleting IDP configuration..."
-    local idp_list idp_alias http_code
+    local idp_list idp_aliases http_code
     idp_list=$(curl -s --connect-timeout 10 --max-time 30 "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
         -H "authorization: Bearer $runai_token")
-    idp_alias=$(echo "$idp_list" | jq -r '.[0].alias // empty' 2>/dev/null)
+    # Run:AI only serves one IDP at a time, but delete every one that is
+    # registered so switching between OIDC and SAML starts from a clean slate.
+    idp_aliases=$(echo "$idp_list" | jq -r '.[]?.alias // empty' 2>/dev/null)
 
-    if [ -n "$idp_alias" ] && [ "$idp_alias" != "null" ]; then
-        http_code=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
-            "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$idp_alias" \
-            -H "authorization: Bearer $runai_token")
-        if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
-            print_success "Deleted IDP '$idp_alias'"
-        else
-            print_warning "Failed to delete IDP (HTTP $http_code)"
-        fi
+    if [ -n "$idp_aliases" ]; then
+        while IFS= read -r idp_alias; do
+            [ -n "$idp_alias" ] || continue
+            http_code=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
+                "$RUNAI_CTRL_PLANE_URL/api/v1/idps/$idp_alias" \
+                -H "authorization: Bearer $runai_token")
+            if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+                print_success "Deleted IDP '$idp_alias'"
+            else
+                print_warning "Failed to delete IDP '$idp_alias' (HTTP $http_code)"
+            fi
+        done <<< "$idp_aliases"
     else
         print_info "No IDP found"
     fi
@@ -210,26 +221,48 @@ reset_integration_secret() {
     fi
 
     print_section "Resetting Integration Secret"
-    local admin_user admin_password public_url
-    admin_user="$(get_secret_value runai-ctrl-plane-data KEYCLOAK_ADMIN)"
-    admin_password="$(get_secret_value runai-ctrl-plane-data KEYCLOAK_ADMIN_PASSWORD)"
-    public_url="$(get_secret_value runai-ctrl-plane-data KC_HOSTNAME)"
+    local ak_token ak_hostname
+    ak_token="$(get_secret_value runai-ctrl-plane-data AK_TOKEN)"
+    ak_hostname="$(get_secret_value runai-ctrl-plane-data AK_PUBLIC_URL)"
 
     kubectl -n "$NAMESPACE" create secret generic runai-ctrl-plane-data \
-        --from-literal=KEYCLOAK_ADMIN="$admin_user" \
-        --from-literal=KEYCLOAK_ADMIN_PASSWORD="$admin_password" \
-        --from-literal=KC_HOSTNAME="$public_url" \
+        --from-literal=AK_TOKEN="$ak_token" \
+        --from-literal=AK_HOSTNAME="$ak_hostname" \
+        --from-literal=AK_PUBLIC_URL="$ak_hostname" \
+        --from-literal=OIDC_APP_SLUG="$OIDC_APP_SLUG" \
+        --from-literal=SAML_APP_SLUG="$SAML_APP_SLUG" \
+        --from-literal=OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
+        --from-literal=RUNAI_SCOPE_NAME="$RUNAI_SCOPE_NAME" \
         --from-literal=RUNAI_CTRL_PLANE_URL="$PLACEHOLDER_RUNAI_CTRL_PLANE_URL" \
         --from-literal=RUNAI_ADMIN_USERNAME=placeholder \
         --from-literal=RUNAI_ADMIN_PASSWORD=placeholder \
         --from-literal=RUNAI_IDP_TYPE=OIDC \
         --dry-run=client -o yaml | kubectl apply -f -
 
-    delete_if_exists job keycloak-idp-integrate-runai
+    delete_if_exists job authentik-idp-integrate-runai
     print_success "Run:AI fields restored to placeholders"
 }
 
+# The HTTPRoute is namespaced and would go with the namespace anyway, but
+# detaching it first makes the gateway stop advertising the hostname straight
+# away rather than answering for a backend that is being torn down.
+delete_exposure() {
+    if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if kubectl -n "$NAMESPACE" get httproute authentik-httproute >/dev/null 2>&1; then
+        print_section "Detaching from Gateway"
+        print_info "Deleting HTTPRoute 'authentik-httproute'${GATEWAY_NAME:+ from gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME}"
+        kubectl -n "$NAMESPACE" delete httproute authentik-httproute \
+            --ignore-not-found --timeout=60s || true
+        print_success "HTTPRoute removed"
+    fi
+}
+
 delete_namespace() {
+    delete_exposure
+
     print_section "Deleting Namespace '$NAMESPACE'"
     if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
         print_info "Namespace already gone"
@@ -237,7 +270,7 @@ delete_namespace() {
     fi
     if command_exists helm && helm status "$HELM_RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
         print_info "Uninstalling Helm release '$HELM_RELEASE'"
-        helm uninstall "$HELM_RELEASE" -n "$NAMESPACE" --wait --timeout 3m || true
+        helm uninstall "$HELM_RELEASE" -n "$NAMESPACE" --wait --timeout 5m || true
     fi
     kubectl delete namespace "$NAMESPACE" --timeout=180s
     print_success "Deleted namespace '$NAMESPACE'"
@@ -247,9 +280,9 @@ display_summary() {
     print_section "Cleanup Complete!"
     echo ""
     if [ "$MODE" = "integration-only" ]; then
-        print_success "Run:AI integration removed. Standalone Keycloak is still running."
+        print_success "Run:AI integration removed. Standalone authentik is still running."
     else
-        print_success "Standalone Keycloak namespace removed"
+        print_success "Standalone authentik namespace removed"
         if [ "$SKIP_RUNAI" != true ]; then
             echo "  • Run:AI IDP, project 'dev-team', and access rules"
         fi
@@ -275,9 +308,9 @@ main() {
             ;;
     esac
 
-    print_section "Standalone Keycloak Cleanup"
+    print_section "Standalone authentik Cleanup"
     check_prerequisites
-    NAMESPACE="${KEYCLOAK_NAMESPACE:-$DEFAULT_NAMESPACE}"
+    NAMESPACE="${AUTHENTIK_NAMESPACE:-$DEFAULT_NAMESPACE}"
     if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
         load_standalone_config
     fi

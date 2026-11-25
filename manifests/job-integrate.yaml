@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: keycloak-idp-integrate-runai
+  name: authentik-idp-integrate-runai
   namespace: __NAMESPACE__
   labels:
-    app.kubernetes.io/part-of: keycloak-idp
+    app.kubernetes.io/part-of: authentik-idp
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 600
+  activeDeadlineSeconds: 900
   template:
     spec:
       restartPolicy: Never
@@ -17,44 +17,32 @@ spec:
           envFrom:
             - secretRef:
                 name: runai-ctrl-plane-data
-          command: ["/scripts/with-tls-bundle.sh", "/scripts/01-url-health-check.sh"]
+          command: ["/scripts/01-integrate-health-check.sh"]
           volumeMounts:
             - name: scripts
               mountPath: /scripts
               readOnly: true
-        - name: keycloak-setup
+        - name: authentik-setup
           image: __JOB_IMAGE__
           envFrom:
             - secretRef:
                 name: runai-ctrl-plane-data
-          command: ["/scripts/with-tls-bundle.sh", "/scripts/02-keycloak-setup.sh"]
+          command: ["/scripts/02-authentik-setup.sh"]
           volumeMounts:
             - name: scripts
               mountPath: /scripts
               readOnly: true
             - name: shared-volume
               mountPath: /shared-files
-            - name: keycloak-realm-data
-              mountPath: /keycloak-realm-data
+            - name: authentik-seed-data
+              mountPath: /authentik-seed
               readOnly: true
-        - name: patch-clients
-          image: __JOB_IMAGE__
-          envFrom:
-            - secretRef:
-                name: runai-ctrl-plane-data
-          command: ["/scripts/with-tls-bundle.sh", "/scripts/02-patch-clients.sh"]
-          volumeMounts:
-            - name: scripts
-              mountPath: /scripts
-              readOnly: true
-            - name: shared-volume
-              mountPath: /shared-files
         - name: runai-setup
           image: __JOB_IMAGE__
           envFrom:
             - secretRef:
                 name: runai-ctrl-plane-data
-          command: ["/scripts/with-tls-bundle.sh", "/scripts/03-runai-setup.sh"]
+          command: ["/scripts/03-runai-setup.sh"]
           volumeMounts:
             - name: scripts
               mountPath: /scripts
@@ -68,10 +56,10 @@ spec:
       volumes:
         - name: scripts
           configMap:
-            name: keycloak-scripts
+            name: authentik-scripts
             defaultMode: 0755
         - name: shared-volume
           emptyDir: {}
-        - name: keycloak-realm-data
+        - name: authentik-seed-data
           configMap:
-            name: keycloak-realm-data
+            name: authentik-seed-data

@@ -2,7 +2,7 @@
 set -e
 
 # If a TLS secret is mounted at /tls/tls.crt (self-signed or private CA),
-# append it to the image CA bundle so reused curl scripts trust Keycloak
+# append it to the image CA bundle so reused curl scripts trust authentik
 # without losing trust for the public Run:AI control plane.
 if [ -f /tls/tls.crt ]; then
   SYSTEM_CA=""

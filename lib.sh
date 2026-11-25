@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared helpers for standalone Keycloak deploy / integrate / cleanup.
+# Shared helpers for deploy / integrate / cleanup.
 # shellcheck disable=SC2034
 
 RED='\033[0;31m'
@@ -9,17 +9,28 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 PLACEHOLDER_RUNAI_CTRL_PLANE_URL="${PLACEHOLDER_RUNAI_CTRL_PLANE_URL:-https://runai-ctrl-plane.placeholder.invalid}"
-DEFAULT_NAMESPACE="${KEYCLOAK_NAMESPACE:-keycloak}"
-DEFAULT_ADMIN_USER="${KEYCLOAK_ADMIN:-admin}"
-DEFAULT_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-admin}"
+DEFAULT_NAMESPACE="${AUTHENTIK_NAMESPACE:-authentik}"
+DEFAULT_ADMIN_EMAIL="${AUTHENTIK_ADMIN_EMAIL:-admin@acme.zzz}"
 DEFAULT_RUNAI_ADMIN_USERNAME="test@run.ai"
 DEFAULT_RUNAI_ADMIN_PASSWORD="Abcd!234"
 JOB_IMAGE="${JOB_IMAGE:-wbitt/network-multitool}"
-HELM_RELEASE="${KEYCLOAK_HELM_RELEASE:-keycloak}"
-KEYCLOAK_CHART="${KEYCLOAK_CHART:-oci://registry-1.docker.io/bitnamicharts/keycloak}"
-KEYCLOAK_CHART_VERSION="${KEYCLOAK_CHART_VERSION:-25.2.0}"
-BITNAMI_KEYCLOAK_IMAGE="${BITNAMI_KEYCLOAK_IMAGE:-bitnamilegacy/keycloak}"
-BITNAMI_POSTGRES_IMAGE="${BITNAMI_POSTGRES_IMAGE:-bitnamilegacy/postgresql}"
+HELM_RELEASE="${AUTHENTIK_HELM_RELEASE:-authentik}"
+AUTHENTIK_CHART="${AUTHENTIK_CHART:-authentik}"
+AUTHENTIK_CHART_REPO="${AUTHENTIK_CHART_REPO:-https://charts.goauthentik.io}"
+AUTHENTIK_CHART_VERSION="${AUTHENTIK_CHART_VERSION:-2026.8.6}"
+
+# authentik object names the scripts create and look up again on re-runs.
+OIDC_APP_SLUG="${OIDC_APP_SLUG:-runai-oidc}"
+SAML_APP_SLUG="${SAML_APP_SLUG:-runai-saml}"
+OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-lab-oidc-client}"
+RUNAI_SCOPE_NAME="${RUNAI_SCOPE_NAME:-runai}"
+
+# EXPOSE_MODE=gateway attaches an HTTPRoute to an existing Gateway API gateway
+# instead of creating an Ingress. Needed where the only trusted certificate is
+# on the control-plane hostname, so authentik has to live under a path on it.
+GATEWAY_NAME="${GATEWAY_NAME:-}"
+GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-}"
+AUTHENTIK_URL_PATH="${AUTHENTIK_URL_PATH:-}"
 
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -79,12 +90,15 @@ render() {
     local src="$1"
     sed \
         -e "s|__NAMESPACE__|${NAMESPACE}|g" \
-        -e "s|__HOSTNAME__|${KEYCLOAK_HOSTNAME}|g" \
+        -e "s|__HOSTNAME__|${AUTHENTIK_HOSTNAME}|g" \
         -e "s|__PUBLIC_URL__|${PUBLIC_URL}|g" \
         -e "s|__INTERNAL_URL__|${INTERNAL_URL}|g" \
         -e "s|__JOB_IMAGE__|${JOB_IMAGE}|g" \
-        -e "s|__ADMIN_USER__|${ADMIN_USER}|g" \
         -e "s|__TLS_SECRET__|${TLS_SECRET_NAME}|g" \
+        -e "s|__URL_PATH__|${URL_PATH:-/}|g" \
+        -e "s|__SERVICE_NAME__|${HELM_RELEASE}-server|g" \
+        -e "s|__GATEWAY_NAME__|${GATEWAY_NAME}|g" \
+        -e "s|__GATEWAY_NAMESPACE__|${GATEWAY_NAMESPACE}|g" \
         "$src"
 }
 
@@ -107,31 +121,6 @@ delete_if_exists() {
     fi
 }
 
-confirm_recreate() {
-    local kind="$1"
-    local name="$2"
-    if ! resource_exists "$kind" "$name"; then
-        return 0
-    fi
-    print_warning "$kind '$name' already exists in namespace '$NAMESPACE'"
-    if [ -n "$KEYCLOAK_FORCE" ]; then
-        print_info "KEYCLOAK_FORCE is set; deleting and recreating"
-        delete_if_exists "$kind" "$name"
-        return 0
-    fi
-    if [ ! -t 0 ]; then
-        print_info "Non-interactive session: leaving existing $kind '$name' in place"
-        return 1
-    fi
-    read -r -p "Delete and recreate it? (y/N): " reply
-    if [[ $reply =~ ^[Yy]$ ]]; then
-        delete_if_exists "$kind" "$name"
-        return 0
-    fi
-    print_info "Keeping existing $kind '$name'"
-    return 1
-}
-
 get_secret_value() {
     local secret_name="$1"
     local key="$2"
@@ -144,42 +133,30 @@ get_configmap_value() {
     kubectl -n "$NAMESPACE" get configmap "$cm_name" -o jsonpath="{.data.$key}" 2>/dev/null
 }
 
-wait_for_deployment() {
-    local name="$1"
-    local timeout="${2:-300s}"
-    print_info "Waiting for deployment '$name' to become ready..."
-    if kubectl -n "$NAMESPACE" rollout status "deployment/$name" --timeout="$timeout"; then
-        print_success "Deployment '$name' is ready"
-    else
-        print_error "Deployment '$name' did not become ready within $timeout"
-        kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=$name"
-        kubectl -n "$NAMESPACE" describe deployment "$name" | tail -n 40
-        exit 1
-    fi
+random_secret() {
+    local bytes="${1:-32}"
+    head -c "$((bytes * 2))" /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c "1-$((bytes * 2))"
 }
 
-wait_for_keycloak() {
+wait_for_authentik() {
     local timeout="${1:-360s}"
-    print_info "Waiting for Keycloak to become ready..."
+    print_info "Waiting for authentik server to become ready..."
     if kubectl -n "$NAMESPACE" wait --for=condition=ready pod \
-        -l "app.kubernetes.io/name=keycloak,app.kubernetes.io/instance=${HELM_RELEASE}" \
+        -l "app.kubernetes.io/name=authentik,app.kubernetes.io/component=server" \
         --timeout="$timeout"; then
-        print_success "Keycloak is ready"
+        print_success "authentik server is ready"
         return 0
     fi
-    print_warning "Keycloak pod wait timed out; check: kubectl -n $NAMESPACE get pods"
+    print_warning "authentik pod wait timed out; check: kubectl -n $NAMESPACE get pods"
     kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/instance=${HELM_RELEASE}" || true
     return 1
 }
 
-keycloak_is_installed() {
+authentik_is_installed() {
     if command_exists helm && helm status "$HELM_RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
         return 0
     fi
-    if kubectl -n "$NAMESPACE" get statefulset keycloak >/dev/null 2>&1; then
-        return 0
-    fi
-    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=keycloak --no-headers 2>/dev/null | grep -q .
+    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=authentik --no-headers 2>/dev/null | grep -q .
 }
 
 get_job_pod() {
@@ -298,6 +275,41 @@ strip_host() {
     echo "$raw"
 }
 
+detect_gateways() {
+    kubectl get gateways.gateway.networking.k8s.io -A -o json 2>/dev/null \
+        | jq -r '.items[]? | "\(.metadata.namespace)/\(.metadata.name)"'
+}
+
+# An HTTPRoute lives in the authentik namespace, so the gateway only accepts it
+# when a listener opts in to routes from elsewhere.
+gateway_allows_other_namespaces() {
+    kubectl -n "$1" get gateway "$2" -o json 2>/dev/null \
+        | jq -e '[.spec.listeners[]?
+                  | (.allowedRoutes.namespaces.from // "Same")
+                  | select(. == "All" or . == "Selector")]
+                 | length > 0' >/dev/null 2>&1
+}
+
+# Works out how traffic reaches this cluster. Prints ingress, gateway, both or
+# none. An IngressClass with no controller behind it would read as a working
+# ingress, so a cluster that has a gateway and no class at all is the clearest
+# signal that Gateway API is the real entry point.
+detect_expose_mode() {
+    local classes gateways
+    classes=$(kubectl get ingressclass -o name 2>/dev/null | grep -c . || true)
+    gateways=$(detect_gateways | grep -c . || true)
+
+    if [ "$classes" -gt 0 ] && [ "$gateways" -gt 0 ]; then
+        echo "both"
+    elif [ "$gateways" -gt 0 ]; then
+        echo "gateway"
+    elif [ "$classes" -gt 0 ]; then
+        echo "ingress"
+    else
+        echo "none"
+    fi
+}
+
 has_default_storage_class() {
     kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -q .
 }
@@ -323,22 +335,22 @@ is_placeholder_url() {
 }
 
 load_standalone_config() {
-    NAMESPACE="${KEYCLOAK_NAMESPACE:-$DEFAULT_NAMESPACE}"
-    if resource_exists configmap keycloak-idp-config; then
+    NAMESPACE="${AUTHENTIK_NAMESPACE:-$DEFAULT_NAMESPACE}"
+    if resource_exists configmap authentik-idp-config; then
         local stored_ns
-        stored_ns=$(get_configmap_value keycloak-idp-config NAMESPACE)
-        if [ -z "$KEYCLOAK_NAMESPACE" ] && [ -n "$stored_ns" ]; then
+        stored_ns=$(get_configmap_value authentik-idp-config NAMESPACE)
+        if [ -z "$AUTHENTIK_NAMESPACE" ] && [ -n "$stored_ns" ]; then
             NAMESPACE="$stored_ns"
         fi
-        KEYCLOAK_HOSTNAME="${KEYCLOAK_HOSTNAME:-$(get_configmap_value keycloak-idp-config KEYCLOAK_HOSTNAME)}"
-        PUBLIC_URL="${PUBLIC_URL:-$(get_configmap_value keycloak-idp-config KEYCLOAK_PUBLIC_URL)}"
-        INTERNAL_URL="${INTERNAL_URL:-$(get_configmap_value keycloak-idp-config KEYCLOAK_INTERNAL_URL)}"
-        TLS_SECRET_NAME="${KEYCLOAK_TLS_SECRET:-$(get_configmap_value keycloak-idp-config TLS_SECRET_NAME)}"
-        HELM_RELEASE="${KEYCLOAK_HELM_RELEASE:-$(get_configmap_value keycloak-idp-config HELM_RELEASE)}"
-        HELM_RELEASE="${HELM_RELEASE:-keycloak}"
+        AUTHENTIK_HOSTNAME="${AUTHENTIK_HOSTNAME:-$(get_configmap_value authentik-idp-config AUTHENTIK_HOSTNAME)}"
+        PUBLIC_URL="${PUBLIC_URL:-$(get_configmap_value authentik-idp-config AUTHENTIK_PUBLIC_URL)}"
+        INTERNAL_URL="${INTERNAL_URL:-$(get_configmap_value authentik-idp-config AUTHENTIK_INTERNAL_URL)}"
+        TLS_SECRET_NAME="${AUTHENTIK_TLS_SECRET:-$(get_configmap_value authentik-idp-config TLS_SECRET_NAME)}"
+        HELM_RELEASE="${AUTHENTIK_HELM_RELEASE:-$(get_configmap_value authentik-idp-config HELM_RELEASE)}"
+        HELM_RELEASE="${HELM_RELEASE:-authentik}"
+        EXPOSE_MODE="${EXPOSE_MODE:-$(get_configmap_value authentik-idp-config EXPOSE_MODE)}"
+        URL_PATH="${URL_PATH:-$(get_configmap_value authentik-idp-config URL_PATH)}"
+        GATEWAY_NAME="${GATEWAY_NAME:-$(get_configmap_value authentik-idp-config GATEWAY_NAME)}"
+        GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-$(get_configmap_value authentik-idp-config GATEWAY_NAMESPACE)}"
     fi
-    if resource_exists secret keycloak-admin; then
-        ADMIN_USER="${KEYCLOAK_ADMIN:-$(get_secret_value keycloak-admin username)}"
-    fi
-    ADMIN_USER="${ADMIN_USER:-$DEFAULT_ADMIN_USER}"
 }

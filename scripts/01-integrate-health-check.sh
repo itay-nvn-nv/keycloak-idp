@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Used by standalone integrate (local and in-cluster). Prints the HTTP code
+# Used by authentik integrate (local and in-cluster). Prints the HTTP code
 # and curl error so a TCP timeout is obvious instead of a silent retry.
 
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-10}"
@@ -41,7 +41,7 @@ attempt=0
 echo "Starting URL health check..."
 while true; do
   attempt=$((attempt + 1))
-  if check_url "Keycloak" "$KC_HOSTNAME" && check_url "App" "$RUNAI_CTRL_PLANE_URL"; then
+  if check_url "authentik" "${AK_HOSTNAME%/}/-/health/ready/" && check_url "App" "$RUNAI_CTRL_PLANE_URL"; then
     echo "All URLs are healthy. Exiting..."
     exit 0
   fi

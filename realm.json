@@ -1,19 +1,4 @@
 {
-  "realm": "mock-idp",
-  "enabled": true,
-  "components": {
-    "org.keycloak.userprofile.UserProfileProvider": [
-      {
-        "providerId": "declarative-user-profile",
-        "subComponents": {},
-        "config": {
-          "kc.user.profile.config": [
-            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"UID\",\"displayName\":\"User ID\",\"validations\":{\"integer\":{\"min\":\"3000\",\"max\":\"4000\"}},\"annotations\":{},\"required\":{\"roles\":[\"admin\",\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"GID\",\"displayName\":\"Group ID\",\"validations\":{\"integer\":{\"min\":\"6000\",\"max\":\"7000\"}},\"annotations\":{},\"required\":{\"roles\":[\"admin\",\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
-          ]
-        }
-      }
-    ]
-  },
   "users": [
     {
       "email": "john.doe@acme.zzz",
@@ -28,9 +13,14 @@
           "temporary": false
         }
       ],
-      "groups": ["admin-group"],
+      "groups": [
+        "admin-group"
+      ],
       "emailVerified": true,
-      "attributes": { "UID": "3010", "GID": "6010" }
+      "attributes": {
+        "UID": "3010",
+        "GID": "6010"
+      }
     },
     {
       "email": "jane.smith@acme.zzz",
@@ -45,9 +35,14 @@
           "temporary": false
         }
       ],
-      "groups": ["developer-group"],
+      "groups": [
+        "developer-group"
+      ],
       "emailVerified": true,
-      "attributes": { "UID": "3020", "GID": "6020" }
+      "attributes": {
+        "UID": "3020",
+        "GID": "6020"
+      }
     },
     {
       "email": "steve.johnson@acme.zzz",
@@ -62,9 +57,14 @@
           "temporary": false
         }
       ],
-      "groups": ["read-only-group"],
+      "groups": [
+        "read-only-group"
+      ],
       "emailVerified": true,
-      "attributes": { "UID": "3030", "GID": "6030" }
+      "attributes": {
+        "UID": "3030",
+        "GID": "6030"
+      }
     },
     {
       "email": "jacky.fox@acme.zzz",
@@ -79,9 +79,14 @@
           "temporary": false
         }
       ],
-      "groups": ["read-only-group"],
+      "groups": [
+        "read-only-group"
+      ],
       "emailVerified": true,
-      "attributes": { "UID": "3040", "GID": "6040" }
+      "attributes": {
+        "UID": "3040",
+        "GID": "6040"
+      }
     },
     {
       "email": "blip.blop@acme.zzz",
@@ -96,153 +101,40 @@
           "temporary": false
         }
       ],
-      "groups": ["read-only-group"],
+      "groups": [
+        "read-only-group"
+      ],
       "emailVerified": true,
-      "attributes": { "UID": "3050", "GID": "6050" }
+      "attributes": {
+        "UID": "3050",
+        "GID": "6050"
+      }
     }
   ],
   "groups": [
     {
       "name": "admin-group",
-      "attributes": { "GID": ["6510"] }
+      "attributes": {
+        "GID": [
+          "6510"
+        ]
+      }
     },
     {
       "name": "developer-group",
-      "attributes": { "GID": ["6520"] }
+      "attributes": {
+        "GID": [
+          "6520"
+        ]
+      }
     },
     {
       "name": "read-only-group",
-      "attributes": { "GID": ["6530"] }
-    }
-  ],
-  "clients": [
-    {
-      "clientId": "lab-oidc-client",
-      "enabled": true,
-      "protocol": "openid-connect",
-      "clientAuthenticatorType": "client-secret",
-      "redirectUris": [
-        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
-      ],
-      "webOrigins": ["RUNAI_CTRL_PLANE_URL_PLACEHOLDER/*"],
       "attributes": {
-        "post.logout.redirect.uris": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/*"
-      },
-      "standardFlowEnabled": true,
-      "protocolMappers": [
-        {
-          "name": "Groups Mapper",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-group-membership-mapper",
-          "consentRequired": false,
-          "config": {
-            "full.path": "false",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "GROUPS",
-            "userinfo.token.claim": "true"
-          }
-        },
-        {
-          "name": "UID Mapper",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "UID",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "UID",
-            "userinfo.token.claim": "true",
-            "jsonType.label": "String"
-          }
-        },
-        {
-          "name": "GID Mapper",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "GID",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "GID",
-            "userinfo.token.claim": "true",
-            "jsonType.label": "String"
-          }
-        }
-      ]
-    },
-    {
-      "protocol": "saml",
-      "clientId": "SAML_CLIENT_ID_PLACEHOLDER",
-      "name": "",
-      "description": "",
-      "publicClient": true,
-      "authorizationServicesEnabled": false,
-      "serviceAccountsEnabled": false,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": true,
-      "standardFlowEnabled": true,
-      "frontchannelLogout": true,
-      "attributes": {
-        "saml_idp_initiated_sso_url_name": "",
-        "saml_idp_initiated_sso_relay_state": "",
-        "post.logout.redirect.uris": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/*",
-        "saml_force_name_id_format": "true",
-        "saml.client.signature": "false",
-        "saml_name_id_format": "email",
-        "saml.server.signature": true,
-        "saml.signature.algorithm": "RSA_SHA256",
-        "saml_single_logout_service_url_post": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
-      },
-      "alwaysDisplayInConsole": false,
-      "rootUrl": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER",
-      "baseUrl": "RUNAI_CTRL_PLANE_URL_PLACEHOLDER",
-      "adminUrl": "",
-      "redirectUris": [
-        "RUNAI_CTRL_PLANE_URL_PLACEHOLDER/auth/realms/runai/broker/RUNAI_IDP_ALIAS_PLACEHOLDER/endpoint"
-      ],
-      "protocolMappers": [
-        {
-          "name": "Groups Mapper",
-          "protocol": "saml",
-          "protocolMapper": "saml-group-membership-mapper",
-          "consentRequired": false,
-          "config": {
-            "single": "true",
-            "attribute.nameformat": "Basic",
-            "full.path": "false",
-            "attribute.name": "GROUPS"
-          }
-        },
-        {
-          "name": "UID Mapper",
-          "protocol": "saml",
-          "protocolMapper": "saml-user-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "UID",
-            "attribute.nameformat": "URI Reference",
-            "aggregate.attrs": "false",
-            "friendly.name": "User ID",
-            "attribute.name": "UID"
-          }
-        },
-        {
-          "name": "GID Mapper",
-          "protocol": "saml",
-          "protocolMapper": "saml-user-attribute-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "GID",
-            "attribute.nameformat": "URI Reference",
-            "aggregate.attrs": "false",
-            "friendly.name": "Group ID",
-            "attribute.name": "GID"
-          }
-        }
-      ]
+        "GID": [
+          "6530"
+        ]
+      }
     }
   ]
 }

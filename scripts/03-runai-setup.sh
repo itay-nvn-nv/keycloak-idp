@@ -2,38 +2,61 @@
 set -e
 
 echo "======================================"
-echo "RUN:AI SETUP"
+echo "RUN:AI SETUP (authentik)"
 echo "======================================"
 
-# The token minted by the previous container has a short lifespan (60s by
-# default on the master realm), so re-mint it when admin credentials are
-# available instead of reusing the shared one.
-load_keycloak_token() {
-  if [ -n "$KC_HOSTNAME" ] && [ -n "$KEYCLOAK_ADMIN" ] && [ -n "$KEYCLOAK_ADMIN_PASSWORD" ]; then
-    FRESH_TOKEN=$(curl -s -X POST "$KC_HOSTNAME/realms/master/protocol/openid-connect/token" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "username=$KEYCLOAK_ADMIN" \
-      -d "password=$KEYCLOAK_ADMIN_PASSWORD" \
-      -d 'grant_type=password' \
-      -d 'client_id=admin-cli' | jq -r '.access_token')
+# Registers authentik with the control plane: create the IDP connector, resolve
+# the alias Run:AI generates for it, rewrite the provider to match, then create
+# the sample project and access rule.
 
-    if [ -n "$FRESH_TOKEN" ] && [ "$FRESH_TOKEN" != "null" ]; then
-      KEYCLOAK_TOKEN="$FRESH_TOKEN"
-      return 0
-    fi
+SHARED="${SHARED_DIR:-/shared-files}"
+OBJECTS="$SHARED/authentik_objects.json"
+RESP=/tmp/ak_resp.json
+
+AK_API="${AK_HOSTNAME%/}/api/v3"
+
+if [ ! -f "$OBJECTS" ]; then
+  echo "ERROR: $OBJECTS is missing (02-authentik-setup.sh must run first)"
+  exit 1
+fi
+
+AK_PUBLIC_URL=$(jq -r '.public_url' "$OBJECTS")
+OIDC_PROVIDER_PK=$(jq -r '.oidc.provider_pk' "$OBJECTS")
+OIDC_APP_SLUG=$(jq -r '.oidc.app_slug' "$OBJECTS")
+OIDC_CLIENT_ID=$(jq -r '.oidc.client_id' "$OBJECTS")
+OIDC_CLIENT_SECRET=$(jq -r '.oidc.client_secret' "$OBJECTS")
+RUNAI_SCOPE_NAME=$(jq -r '.oidc.scope' "$OBJECTS")
+SAML_PROVIDER_PK=$(jq -r '.saml.provider_pk' "$OBJECTS")
+SAML_APP_SLUG=$(jq -r '.saml.app_slug' "$OBJECTS")
+
+RUNAI_CTRL_PLANE_URL="${RUNAI_CTRL_PLANE_URL%/}"
+
+api_code() {
+  _method="$1"; _path="$2"; _body="${3:-}"
+  if [ -n "$_body" ]; then
+    curl -sS -o "$RESP" -w '%{http_code}' -X "$_method" "$AK_API$_path" \
+      -H "Authorization: Bearer $AK_TOKEN" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json' \
+      --data "$_body"
+  else
+    curl -sS -o "$RESP" -w '%{http_code}' -X "$_method" "$AK_API$_path" \
+      -H "Authorization: Bearer $AK_TOKEN" -H 'Accept: application/json'
   fi
-
-  KEYCLOAK_TOKEN=$(cat /shared-files/keycloak_token)
 }
 
-load_keycloak_token
+ok_code() {
+  case "$1" in
+    200|201|204) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # Step 1: Authenticate with Run:AI
 echo ""
 echo "[1/5] Authenticating with Run:AI Control Plane..."
 RUNAI_TOKEN=$(curl -s -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/token" \
   --header 'accept: application/json, text/plain, */*' \
-  --header 'accept-language: en-US,en;q=0.9' \
   --header 'Content-Type: application/json' \
   --data-raw "{
     \"grantType\": \"password\",
@@ -52,12 +75,9 @@ echo "✓ Successfully obtained Run:AI token"
 echo ""
 echo "[2/5] Creating IDP configuration..."
 
-REALM_NAME=$(jq -r '.realm' /shared-files/realm_updated.json)
 IDP_TYPE_LOWER=$(echo "$RUNAI_IDP_TYPE" | tr '[:upper:]' '[:lower:]')
-echo "Realm name: $REALM_NAME"
 echo "IDP type: $RUNAI_IDP_TYPE"
 
-# Prefer the IDP matching the requested type, falling back to the first one
 select_idp() {
   jq -c --arg t "$IDP_TYPE_LOWER" '
     if type == "array" then
@@ -67,73 +87,56 @@ select_idp() {
     end'
 }
 
-# Check if IDP already exists
 echo "Checking if IDP already exists..."
 EXISTING_IDPS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 IDP_EXISTS=$(echo "$EXISTING_IDPS" | jq -r 'length')
 
 if [ "$IDP_EXISTS" != "0" ] && [ "$IDP_EXISTS" != "null" ]; then
+  # Run:AI serves one IDP at a time. Reusing an IDP of the other protocol would
+  # silently wire this provider to the wrong broker alias, so stop instead.
+  EXISTING_TYPE=$(echo "$EXISTING_IDPS" | jq -r '[.[]?.type] | join(",")')
+  if ! echo "$EXISTING_IDPS" | jq -e --arg t "$IDP_TYPE_LOWER" 'any(.[]?; .type == $t)' >/dev/null; then
+    echo "ERROR: the control plane already has a '$EXISTING_TYPE' IDP, but '$IDP_TYPE_LOWER' was requested"
+    echo "Run:AI allows one IDP at a time. Remove the existing one first:"
+    echo "  ./cleanup.sh --integration-only"
+    exit 1
+  fi
   echo "✓ IDP already exists. Skipping IDP creation."
   IDP_OBJECT=$(echo "$EXISTING_IDPS" | select_idp)
 else
   echo "No IDP found. Creating IDP..."
-  
+
   if [ "$RUNAI_IDP_TYPE" = "OIDC" ]; then
     echo "Creating OIDC IDP..."
-    
-    # Get OIDC client data
-    OIDC_CLIENT_ID=$(jq -r '.clients[0].clientId' /shared-files/realm_updated.json)
-    echo "OIDC Client ID: $OIDC_CLIENT_ID"
-    
-    # Retrieve OIDC client secret from Keycloak
-    echo "Retrieving OIDC client secret from Keycloak..."
-    CLIENT_INTERNAL_ID=$(curl -s "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients" \
-      -H "authorization: Bearer $KEYCLOAK_TOKEN" | \
-      jq -r ".[] | select(.clientId==\"$OIDC_CLIENT_ID\") | .id")
-    
-    if [ -z "$CLIENT_INTERNAL_ID" ] || [ "$CLIENT_INTERNAL_ID" = "null" ]; then
-      echo "ERROR: Could not find client with clientId: $OIDC_CLIENT_ID"
+
+    if [ -z "$OIDC_CLIENT_SECRET" ] || [ "$OIDC_CLIENT_SECRET" = "null" ]; then
+      echo "ERROR: No client secret recorded for provider $OIDC_PROVIDER_PK"
       exit 1
     fi
-    
-    CLIENT_SECRET=$(curl -s "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients/$CLIENT_INTERNAL_ID/client-secret" \
-      -H "authorization: Bearer $KEYCLOAK_TOKEN" | \
-      jq -r '.value')
-    
-    if [ -z "$CLIENT_SECRET" ] || [ "$CLIENT_SECRET" = "null" ]; then
-      echo "ERROR: Could not retrieve client secret"
-      exit 1
-    fi
-    echo "✓ Retrieved client secret"
-    
-    DISCOVER_DOCUMENT_URL="$KC_HOSTNAME/realms/$REALM_NAME/.well-known/openid-configuration"
-    
+
+    DISCOVER_DOCUMENT_URL="$AK_PUBLIC_URL/application/o/$OIDC_APP_SLUG/.well-known/openid-configuration"
+    echo "Discovery document: $DISCOVER_DOCUMENT_URL"
+
+    # The Run:AI claim mappers live in a dedicated scope mapping, so that scope
+    # has to be requested alongside openid or the claims are never emitted.
+    IDP_BODY=$(jq -n \
+      --arg url "$DISCOVER_DOCUMENT_URL" \
+      --arg cid "$OIDC_CLIENT_ID" \
+      --arg secret "$OIDC_CLIENT_SECRET" \
+      --arg scope "$RUNAI_SCOPE_NAME" \
+      '{type: "oidc",
+        oidcData: {discoverDocumentUrl: $url, clientId: $cid, clientSecret: $secret,
+                   scopes: ["openid", "profile", "email", $scope], mandatoryClaim: null},
+        mappers: {uid: "UID", gid: "GID", groups: "GROUPS",
+                  supplementaryGroups: "SUPPLEMENTARYGROUPS", email: "email"}}')
+
     HTTP_CODE=$(curl -s -o /tmp/idp_response.json -w "%{http_code}" -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
-    --header 'accept: application/json, text/plain, */*' \
-    --header 'accept-language: en-US,en;q=0.9' \
-    --header 'Content-Type: application/json' \
-    --header "authorization: Bearer $RUNAI_TOKEN" \
-    --data-raw "{
-        \"type\": \"oidc\",
-        \"oidcData\": {
-            \"discoverDocumentUrl\": \"$DISCOVER_DOCUMENT_URL\",
-            \"clientId\": \"$OIDC_CLIENT_ID\",
-            \"clientSecret\": \"$CLIENT_SECRET\",
-            \"scopes\": [
-                \"openid\"
-            ],
-            \"mandatoryClaim\": null
-        },
-        \"mappers\": {
-            \"uid\": \"UID\",
-            \"gid\": \"GID\",
-            \"groups\": \"GROUPS\",
-            \"supplementaryGroups\": \"SUPPLEMENTARYGROUPS\",
-            \"email\": \"email\"
-        }
-    }")
-    
+      --header 'accept: application/json, text/plain, */*' \
+      --header 'Content-Type: application/json' \
+      --header "authorization: Bearer $RUNAI_TOKEN" \
+      --data "$IDP_BODY")
+
     if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
       echo "✓ OIDC IDP created successfully"
       IDP_OBJECT=$(jq -c '.' /tmp/idp_response.json 2>/dev/null || echo '{}')
@@ -142,50 +145,53 @@ else
       cat /tmp/idp_response.json
       exit 1
     fi
-    
+
   elif [ "$RUNAI_IDP_TYPE" = "SAML" ]; then
     echo "Creating SAML IDP..."
-    
-    ENTITY_ID=$(jq -r '.clients[1].clientId' /shared-files/realm_updated.json)
-    echo "Entity ID: $ENTITY_ID"
-    XML_METADATA_URL="$KC_HOSTNAME/realms/$REALM_NAME/protocol/saml/descriptor"
 
-    # Fetch metadata here and send it as a file. The control plane's
-    # metadataXmlUrl fetch is a server-side hop that 504s when Keycloak is
-    # on another cluster (or otherwise unreachable from the control plane).
+    # Fetch over the public URL so the SSO endpoints inside the metadata are the
+    # ones the browser can reach, then send it as a file: the control plane's
+    # own metadataXmlUrl fetch is a server-side hop that 504s when authentik is
+    # on another cluster.
+    XML_METADATA_URL="$AK_PUBLIC_URL/application/saml/$SAML_APP_SLUG/metadata/"
     echo "Fetching SAML metadata from $XML_METADATA_URL ..."
-    METADATA_XML=$(curl -sS "$XML_METADATA_URL")
+    # That URL 302-redirects to the API download endpoint, so follow redirects
+    # rather than reading the empty body of the redirect itself.
+    METADATA_XML=$(curl -sSL "$XML_METADATA_URL" || true)
+
+    if ! echo "$METADATA_XML" | grep -q EntityDescriptor; then
+      echo "Public metadata URL did not return a descriptor; trying the API endpoint..."
+      # Depending on the release this answers with raw XML or with the XML
+      # wrapped in a JSON object, so accept either.
+      METADATA_RAW=$(curl -sSL "$AK_PUBLIC_URL/api/v3/providers/saml/$SAML_PROVIDER_PK/metadata/" \
+        -H "Authorization: Bearer $AK_TOKEN" || true)
+      METADATA_XML=$(printf '%s' "$METADATA_RAW" | jq -r '.metadata // empty' 2>/dev/null || true)
+      if [ -z "$METADATA_XML" ]; then
+        METADATA_XML="$METADATA_RAW"
+      fi
+    fi
+
     if [ -z "$METADATA_XML" ] || ! echo "$METADATA_XML" | grep -q EntityDescriptor; then
-      echo "ERROR: Failed to fetch SAML metadata from Keycloak"
+      echo "ERROR: Failed to fetch SAML metadata from authentik"
       echo "$METADATA_XML" | head -c 500
       echo
       exit 1
     fi
+
     METADATA_B64=$(printf '%s' "$METADATA_XML" | base64 | tr -d '\n')
     IDP_BODY=$(jq -n --arg b64 "$METADATA_B64" '{
-        mappers: {
-            uid: "UID",
-            gid: "GID",
-            groups: "GROUPS",
-            supplementaryGroups: "SUPPLEMENTARYGROUPS",
-            email: "email"
-        },
+        mappers: {uid: "UID", gid: "GID", groups: "GROUPS",
+                  supplementaryGroups: "SUPPLEMENTARYGROUPS", email: "email"},
         type: "saml",
-        samlData: {
-            metadataXmlUrl: "",
-            metadataXmlFile: $b64,
-            fileName: "idp-metadata.xml",
-            metadataXmlType: "file"
-        }
-    }')
+        samlData: {metadataXmlUrl: "", metadataXmlFile: $b64,
+                   fileName: "idp-metadata.xml", metadataXmlType: "file"}}')
 
     HTTP_CODE=$(curl -s -o /tmp/idp_response.json -w "%{http_code}" -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/idps" \
-    --header 'accept: application/json, text/plain, */*' \
-    --header 'accept-language: en-US,en;q=0.9' \
-    --header 'Content-Type: application/json' \
-    --header "authorization: Bearer $RUNAI_TOKEN" \
-    --data "$IDP_BODY")
-    
+      --header 'accept: application/json, text/plain, */*' \
+      --header 'Content-Type: application/json' \
+      --header "authorization: Bearer $RUNAI_TOKEN" \
+      --data "$IDP_BODY")
+
     if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
       echo "✓ SAML IDP created successfully"
       IDP_OBJECT=$(jq -c '.' /tmp/idp_response.json 2>/dev/null || echo '{}')
@@ -194,7 +200,7 @@ else
       cat /tmp/idp_response.json
       exit 1
     fi
-    
+
   else
     echo "ERROR: Invalid RUNAI_IDP_TYPE value: '$RUNAI_IDP_TYPE'"
     echo "RUNAI_IDP_TYPE must be either 'OIDC' or 'SAML'"
@@ -202,13 +208,11 @@ else
   fi
 fi
 
-# Step 3: Align the mock realm client with the broker endpoint of the new IDP.
-# The control plane assigns each IDP a random alias (e.g. oidc-78bd78) and
-# derives the broker redirect URI from it, so the alias cannot be baked into
-# realm.json. The realm still has to be imported first, because creating an
-# OIDC IDP requires the realm's client secret and discovery document.
+# Step 3: Point the authentik provider at the broker endpoint the control plane
+# generated. The alias is random (e.g. oidc-78bd78) and cannot be known before
+# the IDP exists, which is why the provider is seeded with a placeholder.
 echo ""
-echo "[3/5] Aligning Keycloak client with the IDP broker redirect URI..."
+echo "[3/5] Aligning authentik provider with the IDP broker redirect URI..."
 
 IDP_ALIAS=$(echo "$IDP_OBJECT" | jq -r '.alias // empty')
 
@@ -225,9 +229,6 @@ if [ -z "$IDP_ALIAS" ]; then
   exit 1
 fi
 
-# The control plane reports the generic broker path (.../broker/oidc/endpoint)
-# in redirectUri, but brokers the callback on the alias path
-# (.../broker/oidc-78bd78/endpoint), so the alias segment has to be rewritten.
 REPORTED_REDIRECT_URI=$(echo "$IDP_OBJECT" | jq -r '.redirectUri // empty')
 if [ -n "$REPORTED_REDIRECT_URI" ]; then
   IDP_REDIRECT_URI=$(echo "$REPORTED_REDIRECT_URI" | \
@@ -248,49 +249,30 @@ echo "IDP alias: $IDP_ALIAS"
 echo "Broker redirect URI: $IDP_REDIRECT_URI"
 
 if [ "$RUNAI_IDP_TYPE" = "OIDC" ]; then
-  TARGET_CLIENT_ID=$(jq -r '.clients[0].clientId' /shared-files/realm_updated.json)
-else
-  TARGET_CLIENT_ID=$(jq -r '.clients[1].clientId' /shared-files/realm_updated.json)
-fi
-echo "Target client: $TARGET_CLIENT_ID"
-
-load_keycloak_token
-
-CLIENT_OBJECT=$(curl -s -G "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients" \
-  --data-urlencode "clientId=$TARGET_CLIENT_ID" \
-  -H "authorization: Bearer $KEYCLOAK_TOKEN" | \
-  jq -c 'if type == "array" then (.[0] // {}) else {} end')
-
-CLIENT_UUID=$(echo "$CLIENT_OBJECT" | jq -r '.id // empty')
-if [ -z "$CLIENT_UUID" ]; then
-  echo "ERROR: Could not find client '$TARGET_CLIENT_ID' in realm '$REALM_NAME'"
-  exit 1
-fi
-
-UPDATED_CLIENT=$(echo "$CLIENT_OBJECT" | jq -c --arg uri "$IDP_REDIRECT_URI" '
-  .redirectUris = [$uri] |
-  if .protocol == "saml" then
-    .attributes["saml_single_logout_service_url_post"] = $uri
+  echo "Updating OAuth2 provider $OIDC_PROVIDER_PK ..."
+  PATCH_BODY=$(jq -n --arg u "$IDP_REDIRECT_URI" \
+    '{redirect_uris: [{matching_mode: "strict", url: $u}]}')
+  HTTP_CODE=$(api_code PATCH "/providers/oauth2/$OIDC_PROVIDER_PK/" "$PATCH_BODY")
+  if ! ok_code "$HTTP_CODE"; then
+    PATCH_BODY=$(jq -n --arg u "$IDP_REDIRECT_URI" '{redirect_uris: $u}')
+    HTTP_CODE=$(api_code PATCH "/providers/oauth2/$OIDC_PROVIDER_PK/" "$PATCH_BODY")
+  fi
+  if ok_code "$HTTP_CODE"; then
+    echo "✓ Redirect URI set to the '$IDP_ALIAS' broker endpoint"
   else
-    .
-  end')
-
-if [ "$UPDATED_CLIENT" = "$CLIENT_OBJECT" ]; then
-  echo "✓ Client already points at the '$IDP_ALIAS' broker endpoint. Skipping update."
+    echo "ERROR: Failed to update OAuth2 provider (HTTP $HTTP_CODE)"
+    cat "$RESP"
+    exit 1
+  fi
 else
-  echo "Updating client redirect URI..."
-  HTTP_CODE=$(curl -s -o /tmp/client_update_response.json -w "%{http_code}" \
-    -X PUT "$KC_HOSTNAME/admin/realms/$REALM_NAME/clients/$CLIENT_UUID" \
-    -H 'accept: application/json, text/plain, */*' \
-    -H "authorization: Bearer $KEYCLOAK_TOKEN" \
-    -H 'Content-Type: application/json' \
-    --data "$UPDATED_CLIENT")
-
-  if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
-    echo "✓ Client redirect URI set to the '$IDP_ALIAS' broker endpoint"
+  echo "Updating SAML provider $SAML_PROVIDER_PK ..."
+  PATCH_BODY=$(jq -n --arg u "$IDP_REDIRECT_URI" '{acs_url: $u}')
+  HTTP_CODE=$(api_code PATCH "/providers/saml/$SAML_PROVIDER_PK/" "$PATCH_BODY")
+  if ok_code "$HTTP_CODE"; then
+    echo "✓ ACS URL set to the '$IDP_ALIAS' broker endpoint"
   else
-    echo "ERROR: Failed to update client '$TARGET_CLIENT_ID' (HTTP $HTTP_CODE)"
-    cat /tmp/client_update_response.json
+    echo "ERROR: Failed to update SAML provider (HTTP $HTTP_CODE)"
+    cat "$RESP"
     exit 1
   fi
 fi
@@ -299,7 +281,6 @@ fi
 echo ""
 echo "[4/5] Creating project 'dev-team'..."
 
-# Get cluster + department ID's
 echo "Fetching cluster and department information..."
 CLUSTER_DATA=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/departments" \
   -H "authorization: Bearer $RUNAI_TOKEN")
@@ -316,19 +297,14 @@ fi
 echo "Cluster UUID: $CLUSTER_UUID"
 echo "Department ID: $DEPARTMENT_ID"
 
-# Check if project already exists
 echo "Checking if 'dev-team' project already exists..."
 EXISTING_PROJECTS=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 
-# Handle both array and object responses
 if echo "$EXISTING_PROJECTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
   PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.[] | select(.name=="dev-team") | .id // empty')
 else
-  # Response might be wrapped in an object like {"projects": [...]}
   PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.projects[]? | select(.name=="dev-team") | .id // empty')
-  
-  # If still empty, try other common patterns
   if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
     PROJECT_ID=$(echo "$EXISTING_PROJECTS" | jq -r '.data[]? | select(.name=="dev-team") | .id // empty')
   fi
@@ -340,7 +316,6 @@ else
   echo "Project 'dev-team' does not exist. Creating project..."
   PROJECT_DATA=$(curl -s -o /tmp/project_response.json -w "\n%{http_code}" -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/org-unit/projects" \
     -H 'accept: application/json, text/plain, */*' \
-    -H 'accept-language: en-US,en;q=0.9' \
     -H "authorization: Bearer $RUNAI_TOKEN" \
     -H 'Content-Type: application/json' \
     --data-raw "{
@@ -365,10 +340,10 @@ else
       \"interactiveJobTimeLimitSeconds\": null
     }
   }")
-  
+
   HTTP_CODE=$(echo "$PROJECT_DATA" | tail -n1)
   if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
-    PROJECT_ID=$(cat /tmp/project_response.json | jq -r '.id')
+    PROJECT_ID=$(jq -r '.id' /tmp/project_response.json)
     echo "✓ Project created successfully with ID: $PROJECT_ID"
   else
     echo "ERROR: Failed to create project (HTTP $HTTP_CODE)"
@@ -381,13 +356,10 @@ fi
 echo ""
 echo "[5/5] Creating access rule for 'developer-group'..."
 
-# Check if access rule already exists
 echo "Checking if access rule already exists..."
 EXISTING_RULES=$(curl -s "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
   -H "authorization: Bearer $RUNAI_TOKEN")
 
-# The control plane returns the list under .accessRules; older builds used
-# .rules, .data, or a bare array.
 RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r --arg pid "$PROJECT_ID" '
   (if type == "array" then . else (.accessRules // .rules // .data // []) end)
   | map(select(.scopeId == $pid and .subjectId == "developer-group"))
@@ -400,7 +372,6 @@ else
   # roleId 21 is the "AI practitioner" role
   HTTP_CODE=$(curl -s -o /tmp/rule_response.json -w "%{http_code}" -X POST "$RUNAI_CTRL_PLANE_URL/api/v1/authorization/access-rules" \
     -H 'accept: application/json, text/plain, */*' \
-    -H 'accept-language: en-US,en;q=0.9' \
     -H "authorization: Bearer $RUNAI_TOKEN" \
     -H 'Content-Type: application/json' \
     --data-raw "{
@@ -410,7 +381,7 @@ else
     \"subjectType\": \"group\",
     \"roleId\": 21
   }")
-  
+
   if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
     echo "✓ Access rule created successfully"
   else
@@ -424,4 +395,3 @@ echo ""
 echo "======================================"
 echo "RUN:AI SETUP COMPLETE"
 echo "======================================"
-
